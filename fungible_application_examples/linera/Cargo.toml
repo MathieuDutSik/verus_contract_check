@@ -1,0 +1,21 @@
+[package]
+name = "fungible-linera"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+linera-sdk = "0.13"
+async-graphql = "7"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+[dev-dependencies]
+linera-sdk = { version = "0.13", features = ["test"] }
+
+[[bin]]
+name = "fungible_contract"
+path = "src/contract.rs"
+
+[[bin]]
+name = "fungible_service"
+path = "src/service.rs"

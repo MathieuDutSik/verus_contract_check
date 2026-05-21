@@ -1,0 +1,17 @@
+[package]
+name = "fungible-gear"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+gstd = "1.5"
+parity-scale-codec = { version = "3", default-features = false, features = ["derive"] }
+scale-info = { version = "2", default-features = false, features = ["derive"] }
+hashbrown = "0.14"
+
+[profile.release]
+overflow-checks = true
+lto = true
