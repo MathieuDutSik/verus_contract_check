@@ -14,6 +14,15 @@ thiserror = "1"
 [features]
 no-entrypoint = []
 
+# Declare the cfgs that `solana_program::entrypoint!` introduces. They are set
+# by `cargo-build-sbf` for on-chain builds but not by a host `cargo build`,
+# so without this rustc would warn about them as unexpected.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(feature, values("custom-heap", "custom-panic"))',
+] }
+
 [profile.release]
 overflow-checks = true
 lto = "fat"

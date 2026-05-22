@@ -8,6 +8,7 @@ pub struct Fungible {
     pub balances: MapView<AccountOwner, u64>,
 }
 
+#[allow(dead_code)] // credit/debit used by contract binary only; service binary reads
 impl Fungible {
     pub async fn balance(&self, owner: &AccountOwner) -> u64 {
         self.balances.get(owner).await.unwrap_or_default().unwrap_or(0)
