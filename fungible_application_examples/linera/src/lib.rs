@@ -17,7 +17,7 @@ impl ServiceAbi for FungibleAbi {
 
 #[derive(Clone, Debug, Serialize, Deserialize, SimpleObject)]
 pub struct InitialState {
-    pub accounts: BTreeMap<AccountOwner, u128>,
+    pub accounts: BTreeMap<AccountOwner, u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,11 +25,11 @@ pub enum Operation {
     Transfer {
         source: AccountOwner,
         target: AccountOwner,
-        amount: u128,
+        amount: u64,
     },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Message {
-    Credit { target: AccountOwner, amount: u128 },
+    Credit { target: AccountOwner, amount: u64 },
 }

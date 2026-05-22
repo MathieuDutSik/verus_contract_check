@@ -33,6 +33,7 @@ struct Fungible {
 static mut STATE: Option<Fungible> = None;
 
 fn state() -> &'static mut Fungible {
+    #[allow(static_mut_refs)]
     unsafe { STATE.as_mut().expect("uninitialized") }
 }
 

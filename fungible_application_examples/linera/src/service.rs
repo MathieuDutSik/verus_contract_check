@@ -44,11 +44,11 @@ pub struct QueryRoot {
 
 #[Object]
 impl QueryRoot {
-    async fn balance(&self, owner: AccountOwner) -> u128 {
+    async fn balance(&self, owner: AccountOwner) -> u64 {
         self.state.balance(&owner).await
     }
 
-    async fn total_supply(&self) -> u128 {
+    async fn total_supply(&self) -> u64 {
         *self.state.total_supply.get()
     }
 }

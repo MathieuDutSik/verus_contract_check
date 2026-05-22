@@ -34,7 +34,7 @@ impl Contract for FungibleContract {
     }
 
     async fn instantiate(&mut self, argument: InitialState) {
-        let mut total: u128 = 0;
+        let mut total: u64 = 0;
         for (owner, amount) in argument.accounts.iter() {
             total = total.checked_add(*amount).expect("supply overflow");
             self.state.credit(*owner, *amount).await;
@@ -66,7 +66,7 @@ impl Contract for FungibleContract {
 }
 
 impl FungibleContract {
-    fn assert_authorized(&self, owner: &AccountOwner) {
+    fn assert_authorized(&mut self, owner: &AccountOwner) {
         let signer = self.runtime.authenticated_signer().expect("signed op");
         assert_eq!(AccountOwner::from(signer), *owner, "unauthorized source");
     }
