@@ -73,3 +73,97 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::TotalSupply {} => to_json_binary(&TOTAL_SUPPLY.load(deps.storage)?),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env, MockApi, MockQuerier, MockStorage};
+    use cosmwasm_std::{from_json, Addr, OwnedDeps};
+
+    struct Actors { owner: Addr, alice: Addr, bob: Addr }
+
+    fn actors(api: &MockApi) -> Actors {
+        Actors {
+            owner: api.addr_make("owner"),
+            alice: api.addr_make("alice"),
+            bob:   api.addr_make("bob"),
+        }
+    }
+
+    fn setup(supply: u128) -> (OwnedDeps<MockStorage, MockApi, MockQuerier>, Actors) {
+        let mut deps = mock_dependencies();
+        let a = actors(&deps.api);
+        let info = message_info(&a.owner, &[]);
+        let msg = InstantiateMsg { total_supply: Uint128::new(supply) };
+        instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+        (deps, a)
+    }
+
+    fn balance(deps: Deps, who: &Addr) -> u128 {
+        let bin = query(deps, mock_env(), QueryMsg::BalanceOf { account: who.to_string() }).unwrap();
+        let amt: Uint128 = from_json(&bin).unwrap();
+        amt.u128()
+    }
+
+    fn total_supply(deps: Deps) -> u128 {
+        let bin = query(deps, mock_env(), QueryMsg::TotalSupply {}).unwrap();
+        let amt: Uint128 = from_json(&bin).unwrap();
+        amt.u128()
+    }
+
+    #[test]
+    fn init_supply_credited_to_owner() {
+        let (deps, a) = setup(1_000);
+        assert_eq!(total_supply(deps.as_ref()), 1_000);
+        assert_eq!(balance(deps.as_ref(), &a.owner), 1_000);
+    }
+
+    #[test]
+    fn balance_of_unknown_is_zero() {
+        let (deps, _) = setup(1_000);
+        let stranger = deps.api.addr_make("stranger");
+        assert_eq!(balance(deps.as_ref(), &stranger), 0);
+    }
+
+    #[test]
+    fn transfer_happy_path() {
+        let (mut deps, a) = setup(1_000);
+        let info = message_info(&a.owner, &[]);
+        let msg = ExecuteMsg::Transfer { recipient: a.alice.to_string(), amount: Uint128::new(250) };
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+        assert_eq!(balance(deps.as_ref(), &a.owner), 750);
+        assert_eq!(balance(deps.as_ref(), &a.alice), 250);
+    }
+
+    #[test]
+    fn transfer_insufficient_balance() {
+        let (mut deps, a) = setup(100);
+        let info = message_info(&a.owner, &[]);
+        let msg = ExecuteMsg::Transfer { recipient: a.alice.to_string(), amount: Uint128::new(200) };
+        let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+        assert!(matches!(err, ContractError::Insufficient));
+    }
+
+    #[test]
+    fn self_transfer_rejected() {
+        let (mut deps, a) = setup(1_000);
+        let info = message_info(&a.owner, &[]);
+        let msg = ExecuteMsg::Transfer { recipient: a.owner.to_string(), amount: Uint128::new(10) };
+        let err = execute(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+        assert!(matches!(err, ContractError::SelfTransfer));
+    }
+
+    #[test]
+    fn total_supply_invariant_after_transfer() {
+        let (mut deps, a) = setup(1_000);
+        let info = message_info(&a.owner, &[]);
+        for amt in [100u128, 200, 50] {
+            let msg = ExecuteMsg::Transfer { recipient: a.alice.to_string(), amount: Uint128::new(amt) };
+            execute(deps.as_mut(), mock_env(), info.clone(), msg).unwrap();
+        }
+        let sum = balance(deps.as_ref(), &a.owner)
+                + balance(deps.as_ref(), &a.alice)
+                + balance(deps.as_ref(), &a.bob);
+        assert_eq!(sum, total_supply(deps.as_ref()));
+    }
+}

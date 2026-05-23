@@ -1,0 +1,6 @@
+# Cargo build artifacts (per-crate)
+target/
+**/target/
+
+# macOS
+.DS_Store

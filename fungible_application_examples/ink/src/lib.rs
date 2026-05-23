@@ -56,4 +56,70 @@ mod fungible {
             Ok(())
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ink::env::test;
+
+        type AccId = <ink::env::DefaultEnvironment as ink::env::Environment>::AccountId;
+
+        fn accounts() -> test::DefaultAccounts<ink::env::DefaultEnvironment> {
+            test::default_accounts::<ink::env::DefaultEnvironment>()
+        }
+
+        fn set_caller(caller: AccId) {
+            test::set_caller::<ink::env::DefaultEnvironment>(caller);
+        }
+
+        fn setup(supply: Balance) -> (Fungible, test::DefaultAccounts<ink::env::DefaultEnvironment>) {
+            let a = accounts();
+            set_caller(a.alice);
+            let f = Fungible::new(supply);
+            (f, a)
+        }
+
+        #[ink::test]
+        fn init_supply_credited_to_owner() {
+            let (f, a) = setup(1_000);
+            assert_eq!(f.total_supply(), 1_000);
+            assert_eq!(f.balance_of(a.alice), 1_000);
+        }
+
+        #[ink::test]
+        fn balance_of_unknown_is_zero() {
+            let (f, a) = setup(1_000);
+            assert_eq!(f.balance_of(a.charlie), 0);
+        }
+
+        #[ink::test]
+        fn transfer_happy_path() {
+            let (mut f, a) = setup(1_000);
+            f.transfer(a.bob, 250).unwrap();
+            assert_eq!(f.balance_of(a.alice), 750);
+            assert_eq!(f.balance_of(a.bob),   250);
+        }
+
+        #[ink::test]
+        fn transfer_insufficient_balance() {
+            let (mut f, a) = setup(100);
+            assert_eq!(f.transfer(a.bob, 200), Err(Error::InsufficientBalance));
+        }
+
+        #[ink::test]
+        fn self_transfer_rejected() {
+            let (mut f, a) = setup(1_000);
+            assert_eq!(f.transfer(a.alice, 10), Err(Error::SelfTransfer));
+        }
+
+        #[ink::test]
+        fn total_supply_invariant_after_transfer() {
+            let (mut f, a) = setup(1_000);
+            for amt in [100u128, 200, 50] {
+                f.transfer(a.bob, amt).unwrap();
+            }
+            let sum = f.balance_of(a.alice) + f.balance_of(a.bob) + f.balance_of(a.charlie);
+            assert_eq!(sum, f.total_supply());
+        }
+    }
 }

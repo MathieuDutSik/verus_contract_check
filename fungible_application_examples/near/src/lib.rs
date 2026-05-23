@@ -38,3 +38,83 @@ impl Fungible {
         self.balances.insert(receiver, to_next);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::testing_env;
+
+    fn acct(s: &str) -> AccountId { s.parse().unwrap() }
+
+    fn setup(owner: &AccountId, supply: u128) -> Fungible {
+        let mut ctx = VMContextBuilder::new();
+        ctx.predecessor_account_id(owner.clone());
+        testing_env!(ctx.build());
+        Fungible::new(owner.clone(), supply)
+    }
+
+    fn set_caller(who: &AccountId) {
+        let mut ctx = VMContextBuilder::new();
+        ctx.predecessor_account_id(who.clone());
+        testing_env!(ctx.build());
+    }
+
+    #[test]
+    fn init_supply_credited_to_owner() {
+        let owner = acct("owner.near");
+        let f = setup(&owner, 1_000);
+        assert_eq!(f.total_supply(), 1_000);
+        assert_eq!(f.balance_of(owner), 1_000);
+    }
+
+    #[test]
+    fn balance_of_unknown_is_zero() {
+        let owner = acct("owner.near");
+        let f = setup(&owner, 1_000);
+        assert_eq!(f.balance_of(acct("stranger.near")), 0);
+    }
+
+    #[test]
+    fn transfer_happy_path() {
+        let owner = acct("owner.near");
+        let alice = acct("alice.near");
+        let mut f = setup(&owner, 1_000);
+        set_caller(&owner);
+        f.transfer(alice.clone(), 250);
+        assert_eq!(f.balance_of(owner), 750);
+        assert_eq!(f.balance_of(alice), 250);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient balance")]
+    fn transfer_insufficient_balance() {
+        let owner = acct("owner.near");
+        let mut f = setup(&owner, 100);
+        set_caller(&owner);
+        f.transfer(acct("alice.near"), 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "self-transfer")]
+    fn self_transfer_rejected() {
+        let owner = acct("owner.near");
+        let mut f = setup(&owner, 1_000);
+        set_caller(&owner);
+        f.transfer(owner.clone(), 10);
+    }
+
+    #[test]
+    fn total_supply_invariant_after_transfer() {
+        let owner = acct("owner.near");
+        let alice = acct("alice.near");
+        let bob   = acct("bob.near");
+        let mut f = setup(&owner, 1_000);
+        set_caller(&owner);
+        for amt in [100u128, 200, 50] {
+            f.transfer(alice.clone(), amt);
+        }
+        let sum = f.balance_of(owner) + f.balance_of(alice) + f.balance_of(bob);
+        assert_eq!(sum, f.total_supply());
+    }
+}
