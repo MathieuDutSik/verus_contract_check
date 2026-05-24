@@ -1,17 +1,8 @@
-// NEAR fungible-token contract with Verus-verified core arithmetic.
-//
-// The contract below is ordinary NEAR — the only addition versus a plain
-// fungible contract is the `pub mod core;` line, plus the `transfer` body
-// delegating its arithmetic to `core::transfer_balances`. Everything else
-// (the #[near] macros, LookupMap storage, the 6 tests) is unchanged.
-//
-// Build modes:
-//   cargo build                                       — wasm deploy artifact.
-//   cargo test --target $HOST_TRIPLE                  — runs the 6 tests.
-//   cargo verus verify --target wasm32-unknown-unknown — verifies `core`.
+// NEAR-specific glue: SDK macros, storage I/O, caller resolution.
+// The transfer arithmetic delegates to `core::transfer_balances`, which
+// Verus proves preserves the sum of the two affected balances.
 
-pub mod core;
-
+use crate::core;
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, require, AccountId, BorshStorageKey, PanicOnDefault};
 
@@ -22,33 +13,31 @@ enum StorageKey { Balances }
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Fungible {
-    total_supply: u128,
-    balances: LookupMap<AccountId, u128>,
+    total_supply: u64,
+    balances: LookupMap<AccountId, u64>,
 }
 
 #[near]
 impl Fungible {
     #[init]
-    pub fn new(owner: AccountId, total_supply: u128) -> Self {
+    pub fn new(owner: AccountId, total_supply: u64) -> Self {
         let mut balances = LookupMap::new(StorageKey::Balances);
         balances.insert(owner, total_supply);
         Self { total_supply, balances }
     }
 
-    pub fn balance_of(&self, account: AccountId) -> u128 {
+    pub fn balance_of(&self, account: AccountId) -> u64 {
         self.balances.get(&account).copied().unwrap_or(0)
     }
 
-    pub fn total_supply(&self) -> u128 { self.total_supply }
+    pub fn total_supply(&self) -> u64 { self.total_supply }
 
-    pub fn transfer(&mut self, receiver: AccountId, amount: u128) {
+    pub fn transfer(&mut self, receiver: AccountId, amount: u64) {
         let sender = env::predecessor_account_id();
         require!(sender != receiver, "self-transfer");
         let from = self.balances.get(&sender).copied().unwrap_or(0);
         let to   = self.balances.get(&receiver).copied().unwrap_or(0);
-        // Delegate the arithmetic to the Verus-verified core: on success
-        // the two new balances are guaranteed to sum to `from + to`.
-        match crate::core::transfer_balances(from, to, amount) {
+        match core::transfer_balances(from, to, amount) {
             Ok((from_next, to_next)) => {
                 self.balances.insert(sender, from_next);
                 self.balances.insert(receiver, to_next);
@@ -66,7 +55,7 @@ mod tests {
 
     fn acct(s: &str) -> AccountId { s.parse().unwrap() }
 
-    fn setup(owner: &AccountId, supply: u128) -> Fungible {
+    fn setup(owner: &AccountId, supply: u64) -> Fungible {
         let mut ctx = VMContextBuilder::new();
         ctx.predecessor_account_id(owner.clone());
         testing_env!(ctx.build());
@@ -130,7 +119,7 @@ mod tests {
         let bob   = acct("bob.near");
         let mut f = setup(&owner, 1_000);
         set_caller(&owner);
-        for amt in [100u128, 200, 50] {
+        for amt in [100u64, 200, 50] {
             f.transfer(alice.clone(), amt);
         }
         let sum = f.balance_of(owner) + f.balance_of(alice) + f.balance_of(bob);

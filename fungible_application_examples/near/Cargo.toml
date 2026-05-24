@@ -9,9 +9,21 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 near-sdk = "5"
 borsh = "1"
+vstd = "=0.0.0-2026-05-17-0151"
 
 [dev-dependencies]
+# Activates near-sdk's `unit-testing` feature for `cargo test --target $HOST`
+# (otherwise near-sdk's compile_error trips on non-wasm targets).
+# `cargo verus verify --target wasm32-unknown-unknown` doesn't need it,
+# because the wasm target itself satisfies the same compile_error gate.
 near-sdk = { version = "5", features = ["unit-testing"] }
+
+[package.metadata.verus]
+verify = true
+
+# Allow the verus_only cfg that `cargo verus` sets during verification.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
 
 [profile.release]
 codegen-units = 1
