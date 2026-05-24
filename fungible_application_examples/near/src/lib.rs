@@ -11,6 +11,7 @@
 //   cargo verus verify --target wasm32-unknown-unknown — verifies `core`.
 
 pub mod core;
+pub mod lookup_map_axioms;
 
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, require, AccountId, BorshStorageKey, PanicOnDefault};
