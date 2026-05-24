@@ -31,11 +31,16 @@ pub fn transfer_balances(
 ) -> (r: Result<(u128, u128), &'static str>)
     ensures
         match r {
+            // Success: the two new balances sum to the same value as the
+            // original two, and each is exactly `from - amount` / `to + amount`.
             Ok((from_next, to_next)) =>
                 from_next + to_next == from_balance + to_balance
                 && from_next == from_balance - amount
                 && to_next == to_balance + amount,
-            Err(_) => true,
+            // Failure: exactly one of the two failure conditions must hold.
+            Err(_) =>
+                from_balance < amount
+                || to_balance + amount > u128::MAX,
         },
 {
     match from_balance.checked_sub(amount) {
@@ -184,6 +189,61 @@ pub proof fn lemma_transfer_preserves_invariant(
     // sum(m2) == sum(m1) + amount == (sum(m0) - amount) + amount == sum(m0)
 
     assert(m2.dom().finite());
+}
+
+// -- Tightening lemmas (#2, #3, #4) -------------------------------------
+
+/// (#4) The supply field is invariant under transfer — trivial because
+/// `state_after_transfer` constructs the new state with `total_supply:
+/// s.total_supply` verbatim.
+pub proof fn lemma_transfer_preserves_total_supply(
+    s: State, from: AccountId, to: AccountId, amount: nat,
+)
+    ensures state_after_transfer(s, from, to, amount).total_supply == s.total_supply,
+{
+}
+
+/// (#3) Accounts other than `from` and `to` keep their balances exactly.
+/// Follows directly from `Map::insert`'s point-modification axiom.
+pub proof fn lemma_transfer_preserves_other_balances(
+    s: State, from: AccountId, to: AccountId, amount: nat,
+)
+    requires from != to,
+    ensures
+        forall|k: AccountId| #![auto]
+            k != from && k != to ==>
+                state_after_transfer(s, from, to, amount).balances[k] == s.balances[k],
+{
+}
+
+/// (#2) Self-transfer with a positive amount inflates the book-balance by
+/// `amount` — the second `insert(who, t + amount)` overrides the first
+/// `insert(who, f - amount)`, and since `f == t`, the net effect is
+/// `s.balances.insert(who, f + amount)`. This is why `Fungible::transfer`
+/// must `require!(sender != receiver)`.
+pub proof fn lemma_self_transfer_inflates_sum(
+    s: State, who: AccountId, amount: nat,
+)
+    requires
+        s.balances.dom().finite(),
+        s.balances.dom().contains(who),
+        s.balances[who] + amount <= u128::MAX,
+    ensures
+        sum_balances(state_after_transfer(s, who, who, amount).balances)
+            == sum_balances(s.balances) + amount,
+{
+    let f = s.balances[who];
+    let m1 = s.balances.insert(who, (f - amount) as nat);
+    let m2 = m1.insert(who, (f + amount) as nat);
+
+    // The second insert at the same key overrides the first.
+    assert(m2 =~= s.balances.insert(who, (f + amount) as nat));
+
+    // sum(s.balances.insert(who, f+amount)) + s.balances[who]
+    //   == sum(s.balances) + (f + amount)
+    // i.e. sum(m2) + f == sum(s.balances) + f + amount
+    // i.e. sum(m2)     == sum(s.balances) + amount  ✓
+    lemma_sum_after_insert(s.balances, who, (f + amount) as nat);
 }
 
 } // verus!
