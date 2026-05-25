@@ -54,29 +54,70 @@ vstd::prelude::verus! {
         }
     }
 
+    /// The ghost caller of the current contract method. Uninterpreted —
+    /// it stands for whatever AccountId the chain runtime says called us.
+    /// `predecessor()` (below) is wired to return this value, and every
+    /// downstream proof reasons in terms of `the_caller()`.
+    pub uninterp spec fn the_caller() -> AccountId;
+
+    /// Verus-aware wrapper around `env::predecessor_account_id()`. Its
+    /// `ensures` makes the return value equal to the ghost `the_caller()`.
+    #[verifier::external_body]
+    fn predecessor() -> (r: AccountId)
+        ensures r == the_caller(),
+    {
+        env::predecessor_account_id()
+    }
+
+    /// Verified dispatch step: equivalent to `Fungible::transfer`'s body
+    /// except that the caller comes from `predecessor()` (axiomatised as
+    /// `the_caller()`). The `Fungible::transfer` method below is a
+    /// one-line forwarder to this function — the remaining unverified
+    /// glue is just the `&mut self.balances` field access.
+    pub fn verified_transfer(
+        balances: &mut AxLookupMap<AccountId, u128>,
+        receiver: AccountId,
+        amount: u128,
+    )
+        requires the_caller() != receiver,
+        ensures
+            final(balances)@
+                == transfer_balances_map(old(balances)@, the_caller(), receiver, amount),
+    {
+        let sender = predecessor();
+        apply_transfer(balances, sender, receiver, amount);
+    }
+
+    /// Balance of `k` in the map, with absent entries treated as 0.
+    pub open spec fn balance_at(m: Map<AccountId, u128>, k: AccountId) -> u128 {
+        if m.dom().contains(k) { m[k] } else { 0u128 }
+    }
+
+    /// The map after `state_after_transfer`'s balance update — same shape
+    /// as `core::state_after_transfer(...).balances` (just in `u128`-land
+    /// instead of `nat`-land).
+    pub open spec fn transfer_balances_map(
+        m: Map<AccountId, u128>,
+        sender: AccountId,
+        receiver: AccountId,
+        amount: u128,
+    ) -> Map<AccountId, u128> {
+        m.insert(sender,   (balance_at(m, sender) - amount) as u128)
+         .insert(receiver, (balance_at(m, receiver) + amount) as u128)
+    }
+
     pub fn apply_transfer(
         balances: &mut AxLookupMap<AccountId, u128>,
         sender: AccountId,
         receiver: AccountId,
         amount: u128,
     )
-        requires
-            old(balances).view().dom().contains(sender) ==> true,    // trivially true; just naming
-            sender != receiver,
+        requires sender != receiver,
         ensures
-            // Two changed entries are exactly debit/credit.
-            final(balances)@.dom().contains(sender),
-            final(balances)@.dom().contains(receiver),
-            final(balances)@[sender]
-                == (if old(balances)@.dom().contains(sender) { old(balances)@[sender] } else { 0u128 }) - amount,
-            final(balances)@[receiver]
-                == (if old(balances)@.dom().contains(receiver) { old(balances)@[receiver] } else { 0u128 }) + amount,
-            // All other entries unchanged.
-            forall|k: AccountId| #![auto] k != sender && k != receiver ==>
-                final(balances)@.dom().contains(k) == old(balances)@.dom().contains(k),
-            forall|k: AccountId| #![auto]
-                k != sender && k != receiver && old(balances)@.dom().contains(k) ==>
-                    final(balances)@[k] == old(balances)@[k],
+            // Single structural ensures: the storage update is exactly
+            // `state_after_transfer`'s balance update.
+            final(balances)@
+                == transfer_balances_map(old(balances)@, sender, receiver, amount),
     {
         let from = read_balance(balances, &sender);
         let to   = read_balance(balances, &receiver);
@@ -87,6 +128,92 @@ vstd::prelude::verus! {
             }
             Err(msg) => panic_str(msg),
         }
+    }
+
+    // ---- Connection to `core::State` ----------------------------------
+    //
+    // `apply_transfer` operates on `u128` storage. `core::State<A>` and
+    // `core::state_after_transfer` operate on `nat` (for unbounded
+    // arithmetic in proofs). The bridge is `nat_balances`, lifting
+    // `u128`-valued maps to `nat`-valued maps point-wise.
+
+    /// Lift a `u128`-valued balance map into the `nat`-valued spec map.
+    pub open spec fn nat_balances(m: Map<AccountId, u128>) -> Map<AccountId, nat> {
+        Map::new(
+            |a: AccountId| m.dom().contains(a),
+            |a: AccountId| m[a] as nat,
+        )
+    }
+
+    /// Refinement lemma: the `u128`-level transfer (`transfer_balances_map`)
+    /// matches the `nat`-level transfer (`core::state_after_transfer`'s
+    /// `.balances`) when viewed through `nat_balances`, *provided* the
+    /// arithmetic doesn't under/overflow (which `apply_transfer` enforces
+    /// at the call site by panicking on Err from `transfer_balances`).
+    /// A separate `view_fungible(&Fungible) -> core::State<AccountId>`
+    /// lift would let us state Fungible::transfer's spec end-to-end, but
+    /// requires either (a) `external_type_specification` plus field-
+    /// accessor axioms for the macro-wrapped `Fungible` struct, or (b)
+    /// rewriting the contract to avoid `#[near(contract_state)]`. Both
+    /// are deferred — this lemma already establishes the substantive
+    /// refinement at the storage layer.
+    pub proof fn lemma_apply_transfer_matches_state(
+        balances_pre:  Map<AccountId, u128>,
+        sender:        AccountId,
+        receiver:      AccountId,
+        amount:        u128,
+    )
+        requires
+            sender != receiver,
+            // Match `state_after_transfer`'s recommends; the absent-key
+            // case is covered by the map-level `apply_transfer` ensures
+            // and is outside the scope of this state-refinement lemma.
+            balances_pre.dom().contains(sender),
+            balances_pre.dom().contains(receiver),
+            balances_pre[sender] >= amount,
+            balances_pre[receiver] as int + amount as int <= u128::MAX as int,
+        ensures
+            nat_balances(transfer_balances_map(balances_pre, sender, receiver, amount))
+                == crate::core::state_after_transfer(
+                    crate::core::State {
+                        total_supply: 0nat,
+                        balances:     nat_balances(balances_pre),
+                    },
+                    sender, receiver, amount as nat,
+                ).balances,
+    {
+        let bp = balances_pre;
+        let f  = bp[sender];
+        let t  = bp[receiver];
+        let lhs = nat_balances(
+            bp.insert(sender,   (f - amount) as u128)
+              .insert(receiver, (t + amount) as u128)
+        );
+        let rhs = crate::core::state_after_transfer(
+            crate::core::State {
+                total_supply: 0nat,
+                balances:     nat_balances(bp),
+            },
+            sender, receiver, amount as nat,
+        ).balances;
+
+        assert(lhs.dom() =~= rhs.dom());
+
+        assert forall|k: AccountId| #[trigger] lhs.dom().contains(k)
+            implies lhs[k] == rhs[k]
+        by {
+            if k == sender {
+                // Both reduce to (f - amount) as nat, by the precondition
+                // f >= amount.
+            } else if k == receiver {
+                // Both reduce to (t + amount) as nat, by the precondition
+                // t + amount <= u128::MAX.
+            } else {
+                // k ∈ bp.dom(); both sides leave it at bp[k] as nat.
+                assert(bp.dom().contains(k));
+            }
+        }
+        assert(lhs =~= rhs);
     }
 }
 
@@ -117,13 +244,15 @@ impl Fungible {
     pub fn total_supply(&self) -> u128 { self.total_supply }
 
     pub fn transfer(&mut self, receiver: AccountId, amount: u128) {
-        let sender = env::predecessor_account_id();
-        require!(sender != receiver, "self-transfer");
-        // Delegate to the Verus-verified `apply_transfer`: it reads from
-        // the LookupMap via the axiomatized wrapper, calls the verified
-        // `core::transfer_balances` for the arithmetic, and writes back —
-        // all with `ensures` clauses proven against the AxLookupMap view.
-        apply_transfer(&mut self.balances, sender, receiver, amount);
+        // Runtime self-transfer rejection — matches `verified_transfer`'s
+        // `requires the_caller() != receiver` precondition, which the
+        // verified function relies on for its conservation guarantee.
+        require!(env::predecessor_account_id() != receiver, "self-transfer");
+        // Everything substantive is in `verified_transfer`: caller
+        // resolution via the axiomatized `predecessor()`, balance update
+        // via the verified `apply_transfer`, all proven against the
+        // AxLookupMap view.
+        verified_transfer(&mut self.balances, receiver, amount);
     }
 }
 
