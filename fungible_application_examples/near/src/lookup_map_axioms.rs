@@ -54,6 +54,14 @@ verus! {
 #[verifier::external_body]
 pub struct ExAccountId(#[allow(dead_code)] AccountId);
 
+// Equality on AccountId. PartialEq::eq returns true iff the two values
+// are equal at the Verus level. Required because `if a == b` in exec
+// code lowers to a `PartialEq::eq` call.
+pub assume_specification
+    [ <AccountId as core::cmp::PartialEq>::eq ]
+    (a: &AccountId, b: &AccountId) -> (r: bool)
+    ensures r == (*a == *b);
+
 #[verifier::external_body]
 #[verifier::accept_recursive_types(K)]
 #[verifier::accept_recursive_types(V)]

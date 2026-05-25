@@ -14,7 +14,7 @@ pub mod core;
 pub mod lookup_map_axioms;
 
 use crate::lookup_map_axioms::AxLookupMap;
-use near_sdk::{env, near, require, AccountId, BorshStorageKey, PanicOnDefault};
+use near_sdk::{env, near, AccountId, BorshStorageKey, PanicOnDefault};
 
 // Verified helper: apply a transfer to the in-memory balance map.
 // `Fungible::transfer` (below) reads the caller from `predecessor_account_id`,
@@ -69,22 +69,33 @@ vstd::prelude::verus! {
         env::predecessor_account_id()
     }
 
-    /// Verified dispatch step: equivalent to `Fungible::transfer`'s body
-    /// except that the caller comes from `predecessor()` (axiomatised as
-    /// `the_caller()`). The `Fungible::transfer` method below is a
-    /// one-line forwarder to this function — the remaining unverified
-    /// glue is just the `&mut self.balances` field access.
+    /// Verified dispatch step: equivalent to `Fungible::transfer`'s body.
+    /// Reads the caller via `predecessor()` (axiomatised as
+    /// `the_caller()`), rejects self-transfer via `panic_str`, then
+    /// delegates the storage mutation to `apply_transfer`.
+    ///
+    /// No `requires`: the function is callable in any state. The `ensures`
+    /// describes only the success path; on the panic path the postcondition
+    /// is vacuously satisfied (because `panic_str` has `ensures false`).
+    ///
+    /// `Fungible::transfer` below is a one-line forwarder to this
+    /// function — every substantive operation is verified.
     pub fn verified_transfer(
         balances: &mut AxLookupMap<AccountId, u128>,
         receiver: AccountId,
         amount: u128,
     )
-        requires the_caller() != receiver,
         ensures
+            // If we returned, the caller wasn't the receiver and the
+            // storage update is exactly the abstract transfer.
+            the_caller() != receiver,
             final(balances)@
                 == transfer_balances_map(old(balances)@, the_caller(), receiver, amount),
     {
         let sender = predecessor();
+        if sender == receiver {
+            panic_str("self-transfer");
+        }
         apply_transfer(balances, sender, receiver, amount);
     }
 
@@ -244,14 +255,9 @@ impl Fungible {
     pub fn total_supply(&self) -> u128 { self.total_supply }
 
     pub fn transfer(&mut self, receiver: AccountId, amount: u128) {
-        // Runtime self-transfer rejection — matches `verified_transfer`'s
-        // `requires the_caller() != receiver` precondition, which the
-        // verified function relies on for its conservation guarantee.
-        require!(env::predecessor_account_id() != receiver, "self-transfer");
-        // Everything substantive is in `verified_transfer`: caller
-        // resolution via the axiomatized `predecessor()`, balance update
-        // via the verified `apply_transfer`, all proven against the
-        // AxLookupMap view.
+        // One-line forwarder. `verified_transfer` handles caller
+        // resolution, self-transfer rejection, and the balance update;
+        // its `ensures` proves the full transfer semantics.
         verified_transfer(&mut self.balances, receiver, amount);
     }
 }
