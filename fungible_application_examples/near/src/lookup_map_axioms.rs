@@ -44,9 +44,15 @@ use vstd::map::*;
 use near_sdk::store::LookupMap;
 use near_sdk::store::key::Identity;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
-use near_sdk::IntoStorageKey;
+use near_sdk::{AccountId, IntoStorageKey};
 
 verus! {
+
+// NEAR's account identifier (a bech32-like string wrapper). Opaque to
+// Verus; we use it only as a map key.
+#[verifier::external_type_specification]
+#[verifier::external_body]
+pub struct ExAccountId(#[allow(dead_code)] AccountId);
 
 #[verifier::external_body]
 #[verifier::accept_recursive_types(K)]

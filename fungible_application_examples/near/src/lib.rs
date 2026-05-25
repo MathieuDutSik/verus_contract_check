@@ -16,6 +16,80 @@ pub mod lookup_map_axioms;
 use crate::lookup_map_axioms::AxLookupMap;
 use near_sdk::{env, near, require, AccountId, BorshStorageKey, PanicOnDefault};
 
+// Verified helper: apply a transfer to the in-memory balance map.
+// `Fungible::transfer` (below) reads the caller from `predecessor_account_id`,
+// rejects self-transfer, then delegates the actual storage mutation to this
+// function. The `ensures` clauses below pin down what `apply_transfer` does
+// to the abstract view (`@`) of the balance map:
+//   - the sender ends up debited by `amount`,
+//   - the receiver ends up credited by `amount`,
+//   - the sum of those two new balances equals the sum of their two old
+//     balances (with absent entries treated as 0),
+//   - every other account's balance is untouched.
+// If the arithmetic underflows or overflows, `core::transfer_balances`
+// returns Err, this function panics via `panic_str`, and the post-conditions
+// are vacuously true on that path.
+vstd::prelude::verus! {
+    #[cfg(verus_only)]
+    use vstd::prelude::*;
+
+    /// Panic with `msg`; never returns. Wraps `env::panic_str`. The
+    /// `ensures false` postcondition models divergence — any caller will
+    /// have its goal "vacuously satisfied" on the panicking branch.
+    #[verifier::external_body]
+    fn panic_str(msg: &'static str)
+        ensures false,
+    {
+        env::panic_str(msg)
+    }
+
+    /// Read a balance, defaulting absent entries to 0.
+    fn read_balance(map: &AxLookupMap<AccountId, u128>, k: &AccountId) -> (r: u128)
+        ensures
+            r == if map@.dom().contains(*k) { map@[*k] } else { 0u128 },
+    {
+        match map.get(k) {
+            Some(v) => v,
+            None    => 0u128,
+        }
+    }
+
+    pub fn apply_transfer(
+        balances: &mut AxLookupMap<AccountId, u128>,
+        sender: AccountId,
+        receiver: AccountId,
+        amount: u128,
+    )
+        requires
+            old(balances).view().dom().contains(sender) ==> true,    // trivially true; just naming
+            sender != receiver,
+        ensures
+            // Two changed entries are exactly debit/credit.
+            final(balances)@.dom().contains(sender),
+            final(balances)@.dom().contains(receiver),
+            final(balances)@[sender]
+                == (if old(balances)@.dom().contains(sender) { old(balances)@[sender] } else { 0u128 }) - amount,
+            final(balances)@[receiver]
+                == (if old(balances)@.dom().contains(receiver) { old(balances)@[receiver] } else { 0u128 }) + amount,
+            // All other entries unchanged.
+            forall|k: AccountId| #![auto] k != sender && k != receiver ==>
+                final(balances)@.dom().contains(k) == old(balances)@.dom().contains(k),
+            forall|k: AccountId| #![auto]
+                k != sender && k != receiver && old(balances)@.dom().contains(k) ==>
+                    final(balances)@[k] == old(balances)@[k],
+    {
+        let from = read_balance(balances, &sender);
+        let to   = read_balance(balances, &receiver);
+        match crate::core::transfer_balances(from, to, amount) {
+            Ok((from_next, to_next)) => {
+                balances.insert(sender, from_next);
+                balances.insert(receiver, to_next);
+            }
+            Err(msg) => panic_str(msg),
+        }
+    }
+}
+
 #[derive(BorshStorageKey)]
 #[near(serializers = [borsh])]
 enum StorageKey { Balances }
@@ -45,17 +119,11 @@ impl Fungible {
     pub fn transfer(&mut self, receiver: AccountId, amount: u128) {
         let sender = env::predecessor_account_id();
         require!(sender != receiver, "self-transfer");
-        let from = self.balances.get(&sender).unwrap_or(0);
-        let to   = self.balances.get(&receiver).unwrap_or(0);
-        // Delegate the arithmetic to the Verus-verified core: on success
-        // the two new balances are guaranteed to sum to `from + to`.
-        match crate::core::transfer_balances(from, to, amount) {
-            Ok((from_next, to_next)) => {
-                self.balances.insert(sender, from_next);
-                self.balances.insert(receiver, to_next);
-            }
-            Err(msg) => env::panic_str(msg),
-        }
+        // Delegate to the Verus-verified `apply_transfer`: it reads from
+        // the LookupMap via the axiomatized wrapper, calls the verified
+        // `core::transfer_balances` for the arithmetic, and writes back —
+        // all with `ensures` clauses proven against the AxLookupMap view.
+        apply_transfer(&mut self.balances, sender, receiver, amount);
     }
 }
 
