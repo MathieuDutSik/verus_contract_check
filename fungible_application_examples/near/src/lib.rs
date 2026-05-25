@@ -13,7 +13,7 @@
 pub mod core;
 pub mod lookup_map_axioms;
 
-use near_sdk::store::LookupMap;
+use crate::lookup_map_axioms::AxLookupMap;
 use near_sdk::{env, near, require, AccountId, BorshStorageKey, PanicOnDefault};
 
 #[derive(BorshStorageKey)]
@@ -24,20 +24,20 @@ enum StorageKey { Balances }
 #[derive(PanicOnDefault)]
 pub struct Fungible {
     total_supply: u128,
-    balances: LookupMap<AccountId, u128>,
+    balances: AxLookupMap<AccountId, u128>,
 }
 
 #[near]
 impl Fungible {
     #[init]
     pub fn new(owner: AccountId, total_supply: u128) -> Self {
-        let mut balances = LookupMap::new(StorageKey::Balances);
+        let mut balances = AxLookupMap::new(StorageKey::Balances);
         balances.insert(owner, total_supply);
         Self { total_supply, balances }
     }
 
     pub fn balance_of(&self, account: AccountId) -> u128 {
-        self.balances.get(&account).copied().unwrap_or(0)
+        self.balances.get(&account).unwrap_or(0)
     }
 
     pub fn total_supply(&self) -> u128 { self.total_supply }
@@ -45,8 +45,8 @@ impl Fungible {
     pub fn transfer(&mut self, receiver: AccountId, amount: u128) {
         let sender = env::predecessor_account_id();
         require!(sender != receiver, "self-transfer");
-        let from = self.balances.get(&sender).copied().unwrap_or(0);
-        let to   = self.balances.get(&receiver).copied().unwrap_or(0);
+        let from = self.balances.get(&sender).unwrap_or(0);
+        let to   = self.balances.get(&receiver).unwrap_or(0);
         // Delegate the arithmetic to the Verus-verified core: on success
         // the two new balances are guaranteed to sum to `from + to`.
         match crate::core::transfer_balances(from, to, amount) {
