@@ -12,7 +12,7 @@ use thiserror::Error;
 // axiomatized helpers share a single set of `Map`/`Item` definitions.
 use crate::cw_axioms::{
     TOTAL_SUPPLY,
-    ax_balances_load, ax_balances_save, ax_supply_save,
+    ax_balances_load, ax_balances_save, ax_supply_load, ax_supply_save,
     ax_allowances_load, ax_allowances_save,
 };
 
@@ -307,6 +307,144 @@ vstd::prelude::verus! {
         }
         assert(lhs =~= rhs);
     }
+
+    // -- Mint & burn ----------------------------------------------------
+
+    /// Verified `mint`: credits `amount` to `to` and increases
+    /// `total_supply` by the same amount. Fails on supply overflow.
+    /// No authorization check — wrapping callers should enforce that
+    /// (typically restricted to a Minter address in real cw20).
+    pub fn verified_mint<S: Storage>(
+        storage: &mut S,
+        to:      &Addr,
+        amount:  u128,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    supply_view(final(storage))
+                        == (supply_view(old(storage)) + amount) as u128
+                    && balances_view(final(storage))
+                        == balances_view(old(storage)).insert(
+                            *to,
+                            (balance_at(balances_view(old(storage)), *to) + amount) as u128,
+                        )
+                    && allowances_view(final(storage)) == allowances_view(old(storage)),
+                Err(_) => true,
+            },
+    {
+        let supply = ax_supply_load(storage);
+        let bal    = ax_balances_load(storage, to);
+        // Both arithmetic operations must succeed.
+        let new_supply = match supply.checked_add(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Overflow),
+        };
+        let new_bal = match bal.checked_add(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Overflow),
+        };
+        ax_supply_save(storage, new_supply);
+        ax_balances_save(storage, to, new_bal);
+        Ok(())
+    }
+
+    /// Verified `burn`: debits `amount` from `from` and decreases
+    /// `total_supply` by the same amount. Fails if `from` doesn't have
+    /// enough balance. The caller is expected to be `from` in cw20
+    /// (you burn your own tokens); we don't enforce that here.
+    pub fn verified_burn<S: Storage>(
+        storage: &mut S,
+        from:    &Addr,
+        amount:  u128,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    supply_view(final(storage))
+                        == (supply_view(old(storage)) - amount) as u128
+                    && balances_view(final(storage))
+                        == balances_view(old(storage)).insert(
+                            *from,
+                            (balance_at(balances_view(old(storage)), *from) - amount) as u128,
+                        )
+                    && allowances_view(final(storage)) == allowances_view(old(storage)),
+                Err(_) => true,
+            },
+    {
+        let supply = ax_supply_load(storage);
+        let bal    = ax_balances_load(storage, from);
+        let new_bal = match bal.checked_sub(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Insufficient),
+        };
+        let new_supply = match supply.checked_sub(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Insufficient),
+        };
+        ax_supply_save(storage, new_supply);
+        ax_balances_save(storage, from, new_bal);
+        Ok(())
+    }
+
+    // -- Allowance delta operations ------------------------------------
+
+    /// Atomic increase of `(owner, spender)` allowance by `amount`.
+    /// Fails on overflow. No state change on failure.
+    pub fn verified_increase_allowance<S: Storage>(
+        storage: &mut S,
+        owner:   &Addr,
+        spender: &Addr,
+        amount:  u128,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    allowances_view(final(storage))
+                        == allowances_view(old(storage)).insert(
+                            (*owner, *spender),
+                            (allowance_at(allowances_view(old(storage)), *owner, *spender) + amount) as u128,
+                        )
+                    && balances_view(final(storage)) == balances_view(old(storage))
+                    && supply_view(final(storage))   == supply_view(old(storage)),
+                Err(_) => true,
+            },
+    {
+        let current = ax_allowances_load(storage, owner, spender);
+        match current.checked_add(amount) {
+            Some(new) => {
+                ax_allowances_save(storage, owner, spender, new);
+                Ok(())
+            }
+            None => Err(TransferError::Overflow),
+        }
+    }
+
+    /// Atomic decrease of `(owner, spender)` allowance by `amount`,
+    /// saturating at 0 (cw20 convention). Always succeeds.
+    pub fn verified_decrease_allowance<S: Storage>(
+        storage: &mut S,
+        owner:   &Addr,
+        spender: &Addr,
+        amount:  u128,
+    )
+        ensures
+            allowances_view(final(storage))
+                == allowances_view(old(storage)).insert(
+                    (*owner, *spender),
+                    if allowance_at(allowances_view(old(storage)), *owner, *spender) >= amount {
+                        (allowance_at(allowances_view(old(storage)), *owner, *spender) - amount) as u128
+                    } else {
+                        0u128
+                    },
+                ),
+            balances_view(final(storage)) == balances_view(old(storage)),
+            supply_view(final(storage))   == supply_view(old(storage)),
+    {
+        let current = ax_allowances_load(storage, owner, spender);
+        let new = if current >= amount { current - amount } else { 0u128 };
+        ax_allowances_save(storage, owner, spender, new);
+    }
 }
 
 #[cw_serde]
@@ -316,9 +454,13 @@ pub struct InstantiateMsg {
 
 #[cw_serde]
 pub enum ExecuteMsg {
-    Transfer     { recipient: String, amount: Uint128 },
-    Approve      { spender:   String, amount: Uint128 },
-    TransferFrom { owner:     String, recipient: String, amount: Uint128 },
+    Transfer          { recipient: String, amount: Uint128 },
+    Approve           { spender:   String, amount: Uint128 },
+    TransferFrom      { owner:     String, recipient: String, amount: Uint128 },
+    Mint              { recipient: String, amount: Uint128 },
+    Burn              { amount: Uint128 },
+    IncreaseAllowance { spender:   String, amount: Uint128 },
+    DecreaseAllowance { spender:   String, amount: Uint128 },
 }
 
 #[cw_serde]
@@ -413,6 +555,45 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> 
                 .add_attribute("spender", info.sender)
                 .add_attribute("owner", owner_addr)
                 .add_attribute("to", to)
+                .add_attribute("amount", amount.to_string()))
+        }
+        ExecuteMsg::Mint { recipient, amount } => {
+            // NOTE: a real cw20 would gate this with a Minter-address
+            // check. Omitted here to keep the focus on the verified
+            // arithmetic + invariant story.
+            let to = deps.api.addr_validate(&recipient)?;
+            verified_mint(&mut store_ref, &to, amount.u128())
+                .map_err(map_transfer_error)?;
+            Ok(Response::new()
+                .add_attribute("action", "mint")
+                .add_attribute("to", to)
+                .add_attribute("amount", amount.to_string()))
+        }
+        ExecuteMsg::Burn { amount } => {
+            verified_burn(&mut store_ref, &info.sender, amount.u128())
+                .map_err(map_transfer_error)?;
+            Ok(Response::new()
+                .add_attribute("action", "burn")
+                .add_attribute("from", info.sender)
+                .add_attribute("amount", amount.to_string()))
+        }
+        ExecuteMsg::IncreaseAllowance { spender, amount } => {
+            let spender_addr = deps.api.addr_validate(&spender)?;
+            verified_increase_allowance(&mut store_ref, &info.sender, &spender_addr, amount.u128())
+                .map_err(map_transfer_error)?;
+            Ok(Response::new()
+                .add_attribute("action", "increase_allowance")
+                .add_attribute("owner", info.sender)
+                .add_attribute("spender", spender_addr)
+                .add_attribute("amount", amount.to_string()))
+        }
+        ExecuteMsg::DecreaseAllowance { spender, amount } => {
+            let spender_addr = deps.api.addr_validate(&spender)?;
+            verified_decrease_allowance(&mut store_ref, &info.sender, &spender_addr, amount.u128());
+            Ok(Response::new()
+                .add_attribute("action", "decrease_allowance")
+                .add_attribute("owner", info.sender)
+                .add_attribute("spender", spender_addr)
                 .add_attribute("amount", amount.to_string()))
         }
     }
@@ -611,5 +792,106 @@ mod tests {
         approve(&mut deps, &a.owner, &a.alice, 250);
         let err = transfer_from(&mut deps, &a.alice, &a.owner, &a.owner, 100).unwrap_err();
         assert!(matches!(err, ContractError::SelfTransfer));
+    }
+
+    // ---- mint / burn / allowance delta ----
+
+    fn mint(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, caller: &Addr, recipient: &Addr, amount: u128) -> Result<(), ContractError> {
+        let info = message_info(caller, &[]);
+        let msg = ExecuteMsg::Mint { recipient: recipient.to_string(), amount: Uint128::new(amount) };
+        execute(deps.as_mut(), mock_env(), info, msg).map(|_| ())
+    }
+
+    fn burn(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, caller: &Addr, amount: u128) -> Result<(), ContractError> {
+        let info = message_info(caller, &[]);
+        let msg = ExecuteMsg::Burn { amount: Uint128::new(amount) };
+        execute(deps.as_mut(), mock_env(), info, msg).map(|_| ())
+    }
+
+    fn increase_allowance(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, caller: &Addr, spender: &Addr, amount: u128) -> Result<(), ContractError> {
+        let info = message_info(caller, &[]);
+        let msg = ExecuteMsg::IncreaseAllowance { spender: spender.to_string(), amount: Uint128::new(amount) };
+        execute(deps.as_mut(), mock_env(), info, msg).map(|_| ())
+    }
+
+    fn decrease_allowance(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, caller: &Addr, spender: &Addr, amount: u128) {
+        let info = message_info(caller, &[]);
+        let msg = ExecuteMsg::DecreaseAllowance { spender: spender.to_string(), amount: Uint128::new(amount) };
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+    }
+
+    #[test]
+    fn mint_increases_supply_and_balance() {
+        let (mut deps, a) = setup(1_000);
+        mint(&mut deps, &a.owner, &a.alice, 250).unwrap();
+        assert_eq!(total_supply(deps.as_ref()), 1_250);
+        assert_eq!(balance(deps.as_ref(), &a.alice), 250);
+        assert_eq!(balance(deps.as_ref(), &a.owner), 1_000); // unchanged
+    }
+
+    #[test]
+    fn burn_decreases_supply_and_balance() {
+        let (mut deps, a) = setup(1_000);
+        burn(&mut deps, &a.owner, 250).unwrap();
+        assert_eq!(total_supply(deps.as_ref()), 750);
+        assert_eq!(balance(deps.as_ref(), &a.owner), 750);
+    }
+
+    #[test]
+    fn burn_insufficient_balance() {
+        let (mut deps, a) = setup(100);
+        let err = burn(&mut deps, &a.owner, 200).unwrap_err();
+        assert!(matches!(err, ContractError::Insufficient));
+        assert_eq!(total_supply(deps.as_ref()), 100); // unchanged
+        assert_eq!(balance(deps.as_ref(), &a.owner), 100);
+    }
+
+    #[test]
+    fn mint_burn_round_trip_preserves_supply() {
+        let (mut deps, a) = setup(1_000);
+        mint(&mut deps, &a.owner, &a.alice, 250).unwrap();
+        burn(&mut deps, &a.alice, 250).unwrap();
+        assert_eq!(total_supply(deps.as_ref()), 1_000);
+        assert_eq!(balance(deps.as_ref(), &a.alice), 0);
+    }
+
+    #[test]
+    fn increase_allowance_adds_to_current() {
+        let (mut deps, a) = setup(1_000);
+        approve(&mut deps, &a.owner, &a.alice, 100);
+        increase_allowance(&mut deps, &a.owner, &a.alice, 50).unwrap();
+        assert_eq!(allowance(deps.as_ref(), &a.owner, &a.alice), 150);
+    }
+
+    #[test]
+    fn decrease_allowance_subtracts_saturating_at_zero() {
+        let (mut deps, a) = setup(1_000);
+        approve(&mut deps, &a.owner, &a.alice, 100);
+        decrease_allowance(&mut deps, &a.owner, &a.alice, 30);
+        assert_eq!(allowance(deps.as_ref(), &a.owner, &a.alice), 70);
+        // Saturating: decrease past zero clamps.
+        decrease_allowance(&mut deps, &a.owner, &a.alice, 999);
+        assert_eq!(allowance(deps.as_ref(), &a.owner, &a.alice), 0);
+    }
+
+    #[test]
+    fn conservation_after_mixed_ops() {
+        // The invariant sum(balances) == total_supply should hold across
+        // any sequence of valid operations, including mint and burn.
+        let (mut deps, a) = setup(1_000);
+        mint(&mut deps, &a.owner, &a.alice, 500).unwrap();         // supply: 1500
+        transfer_from_via_approval(&mut deps, &a);                 // alice approves bob
+        burn(&mut deps, &a.alice, 100).unwrap();                   // supply: 1400
+        increase_allowance(&mut deps, &a.alice, &a.bob, 50).unwrap();
+
+        let sum = balance(deps.as_ref(), &a.owner)
+                + balance(deps.as_ref(), &a.alice)
+                + balance(deps.as_ref(), &a.bob);
+        assert_eq!(sum, total_supply(deps.as_ref()));
+    }
+
+    fn transfer_from_via_approval(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, a: &Actors) {
+        approve(deps, &a.alice, &a.bob, 100);
+        transfer_from(deps, &a.bob, &a.alice, &a.owner, 50).unwrap();
     }
 }

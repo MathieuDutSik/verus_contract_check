@@ -203,4 +203,62 @@ pub proof fn lemma_self_transfer_inflates_sum<A>(
     lemma_sum_after_insert(s.balances, who, (f + amount) as nat);
 }
 
+// -- Layer 3: mint & burn ----------------------------------------------
+//
+// Unlike transfer, mint and burn change `total_supply`. The invariant
+// `sum(balances) == total_supply` is preserved because the supply change
+// and the balance change are equal.
+
+/// New state after minting `amount` to `to`.
+pub open spec fn state_after_mint<A>(s: State<A>, to: A, amount: nat) -> State<A>
+    recommends
+        s.balances.dom().contains(to),
+{
+    let t = s.balances[to];
+    State {
+        total_supply: s.total_supply + amount,
+        balances:     s.balances.insert(to, (t + amount) as nat),
+    }
+}
+
+/// New state after burning `amount` from `from`.
+pub open spec fn state_after_burn<A>(s: State<A>, from: A, amount: nat) -> State<A>
+    recommends
+        s.balances.dom().contains(from),
+        s.balances[from] >= amount,
+{
+    let f = s.balances[from];
+    State {
+        total_supply: (s.total_supply - amount) as nat,
+        balances:     s.balances.insert(from, (f - amount) as nat),
+    }
+}
+
+/// Mint preserves the conservation invariant: `total_supply` and
+/// `sum(balances)` grow by the same amount.
+pub proof fn lemma_mint_preserves_invariant<A>(s: State<A>, to: A, amount: nat)
+    requires
+        s.invariant(),
+        s.balances.dom().contains(to),
+    ensures
+        state_after_mint(s, to, amount).invariant(),
+{
+    let t = s.balances[to];
+    lemma_sum_after_insert(s.balances, to, (t + amount) as nat);
+}
+
+/// Burn preserves the conservation invariant: both sides decrease by `amount`.
+pub proof fn lemma_burn_preserves_invariant<A>(s: State<A>, from: A, amount: nat)
+    requires
+        s.invariant(),
+        s.balances.dom().contains(from),
+        s.balances[from] >= amount,
+        s.total_supply >= amount,
+    ensures
+        state_after_burn(s, from, amount).invariant(),
+{
+    let f = s.balances[from];
+    lemma_sum_after_insert(s.balances, from, (f - amount) as nat);
+}
+
 } // verus!
