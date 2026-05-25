@@ -35,10 +35,11 @@ use vstd::map::Map as SpecMap;
 use cosmwasm_std::{Addr, Storage, Uint128, StdError};
 use cw_storage_plus::{Item, Map};
 
-// The two storage handles. Constants so we share one address-space view
-// of storage across the whole contract.
-pub const BALANCES: Map<&Addr, Uint128> = Map::new("balances");
-pub const TOTAL_SUPPLY: Item<Uint128>   = Item::new("total_supply");
+// Storage handles. Constants so we share one address-space view of
+// storage across the whole contract.
+pub const BALANCES:     Map<&Addr, Uint128>             = Map::new("balances");
+pub const TOTAL_SUPPLY: Item<Uint128>                   = Item::new("total_supply");
+pub const ALLOWANCES:   Map<(&Addr, &Addr), Uint128>    = Map::new("allowances");
 
 verus! {
 
@@ -79,6 +80,10 @@ pub uninterp spec fn balances_view<S: Storage>(storage: &S) -> SpecMap<Addr, u12
 /// The abstract scalar value of the storage's `TOTAL_SUPPLY` item.
 pub uninterp spec fn supply_view<S: Storage>(storage: &S) -> u128;
 
+/// The abstract `Map<(Owner, Spender), u128>` content of the storage's
+/// `ALLOWANCES` map.
+pub uninterp spec fn allowances_view<S: Storage>(storage: &S) -> SpecMap<(Addr, Addr), u128>;
+
 // -- Balance reads ------------------------------------------------------
 
 /// Read the balance of `k`, treating absent entries as 0.
@@ -104,12 +109,14 @@ pub fn ax_balances_has<S: Storage>(storage: &S, k: &Addr) -> (r: bool)
 
 // -- Balance writes -----------------------------------------------------
 
-/// Point insert / overwrite.
+/// Point insert / overwrite. Touches the balances map only; supply and
+/// allowances are unchanged.
 #[verifier::external_body]
 pub fn ax_balances_save<S: Storage>(storage: &mut S, k: &Addr, v: u128)
     ensures
-        balances_view(final(storage)) == balances_view(old(storage)).insert(*k, v),
-        supply_view(final(storage))   == supply_view(old(storage)),
+        balances_view(final(storage))   == balances_view(old(storage)).insert(*k, v),
+        supply_view(final(storage))     == supply_view(old(storage)),
+        allowances_view(final(storage)) == allowances_view(old(storage)),
 {
     BALANCES.save(storage, k, &Uint128::new(v)).unwrap()
 }
@@ -126,10 +133,39 @@ pub fn ax_supply_load<S: Storage>(storage: &S) -> (r: u128)
 #[verifier::external_body]
 pub fn ax_supply_save<S: Storage>(storage: &mut S, v: u128)
     ensures
-        supply_view(final(storage))   == v,
-        balances_view(final(storage)) == balances_view(old(storage)),
+        supply_view(final(storage))     == v,
+        balances_view(final(storage))   == balances_view(old(storage)),
+        allowances_view(final(storage)) == allowances_view(old(storage)),
 {
     TOTAL_SUPPLY.save(storage, &Uint128::new(v)).unwrap()
+}
+
+// -- Allowances --------------------------------------------------------
+
+/// Read the allowance `(owner, spender) → amount`, defaulting absent to 0.
+#[verifier::external_body]
+pub fn ax_allowances_load<S: Storage>(storage: &S, owner: &Addr, spender: &Addr) -> (r: u128)
+    ensures
+        r == if allowances_view(storage).dom().contains((*owner, *spender)) {
+            allowances_view(storage)[(*owner, *spender)]
+        } else {
+            0u128
+        },
+{
+    ALLOWANCES.may_load(storage, (owner, spender)).unwrap().map(|v| v.u128()).unwrap_or(0)
+}
+
+/// Set the allowance `(owner, spender) → amount`. Touches allowances
+/// only; balances and supply are unchanged.
+#[verifier::external_body]
+pub fn ax_allowances_save<S: Storage>(storage: &mut S, owner: &Addr, spender: &Addr, amount: u128)
+    ensures
+        allowances_view(final(storage))
+            == allowances_view(old(storage)).insert((*owner, *spender), amount),
+        balances_view(final(storage)) == balances_view(old(storage)),
+        supply_view(final(storage))   == supply_view(old(storage)),
+{
+    ALLOWANCES.save(storage, (owner, spender), &Uint128::new(amount)).unwrap()
 }
 
 } // verus!

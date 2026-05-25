@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::cw_axioms::{
     TOTAL_SUPPLY,
     ax_balances_load, ax_balances_save, ax_supply_save,
+    ax_allowances_load, ax_allowances_save,
 };
 
 // -- Verified transfer helper ------------------------------------------
@@ -29,16 +30,17 @@ vstd::prelude::verus! {
     #[cfg(verus_only)]
     use vstd::map::Map as SpecMap;
     #[cfg(verus_only)]
-    use crate::cw_axioms::{balances_view, supply_view};
+    use crate::cw_axioms::{balances_view, supply_view, allowances_view};
 
-    /// Failure modes of `verified_transfer`. Mirrors the runtime
-    /// `ContractError` but is closed (no `Std` variant) so it can be
-    /// returned from verified code.
+    /// Failure modes of `verified_transfer` / `verified_transfer_from`.
+    /// Mirrors the runtime `ContractError` but is closed (no `Std`
+    /// variant) so it can be returned from verified code.
     #[derive(PartialEq, Eq)]
     pub enum TransferError {
         SelfTransfer,
         Insufficient,
         Overflow,
+        InsufficientAllowance,
     }
 
     /// Balance of `k` in the abstract map, with absent entries treated as 0.
@@ -59,7 +61,8 @@ vstd::prelude::verus! {
 
     /// Verified transfer step: ensures the storage update matches
     /// `transfer_balances_map` on success, leaves storage untouched on
-    /// error. `supply_view` is preserved either way.
+    /// error. `supply_view` and `allowances_view` are preserved either
+    /// way (transfers only touch balances).
     pub fn verified_transfer<S: Storage>(
         storage:  &mut S,
         sender:   &Addr,
@@ -72,7 +75,8 @@ vstd::prelude::verus! {
                     *sender != *receiver
                     && balances_view(final(storage))
                         == transfer_balances_map(balances_view(old(storage)), *sender, *receiver, amount)
-                    && supply_view(final(storage)) == supply_view(old(storage)),
+                    && supply_view(final(storage))     == supply_view(old(storage))
+                    && allowances_view(final(storage)) == allowances_view(old(storage)),
                 Err(_) => true,
             },
     {
@@ -156,6 +160,97 @@ vstd::prelude::verus! {
         ax_balances_load(storage, account)
     }
 
+    // -- cw20 allowance machinery --------------------------------------
+
+    /// Allowance for `(owner, spender)` in the abstract map, defaulting
+    /// absent entries to 0.
+    pub open spec fn allowance_at(
+        m: SpecMap<(Addr, Addr), u128>,
+        owner: Addr,
+        spender: Addr,
+    ) -> u128 {
+        if m.dom().contains((owner, spender)) { m[(owner, spender)] } else { 0u128 }
+    }
+
+    /// Verified allowance query: returns the `(owner, spender)` allowance
+    /// per the abstract view.
+    pub fn verified_allowance<S: Storage>(
+        storage: &S,
+        owner:   &Addr,
+        spender: &Addr,
+    ) -> (r: u128)
+        ensures
+            r == allowance_at(allowances_view(storage), *owner, *spender),
+    {
+        ax_allowances_load(storage, owner, spender)
+    }
+
+    /// Verified `approve`: `owner` sets `spender`'s allowance to exactly
+    /// `amount`, replacing any previous value. Balances and supply are
+    /// untouched.
+    pub fn verified_approve<S: Storage>(
+        storage: &mut S,
+        owner:   &Addr,
+        spender: &Addr,
+        amount:  u128,
+    )
+        ensures
+            allowances_view(final(storage))
+                == allowances_view(old(storage)).insert((*owner, *spender), amount),
+            balances_view(final(storage)) == balances_view(old(storage)),
+            supply_view(final(storage))   == supply_view(old(storage)),
+    {
+        ax_allowances_save(storage, owner, spender, amount);
+    }
+
+    /// Verified `transfer_from`: `spender` moves `amount` from `owner` to
+    /// `recipient`, decrementing the `(owner, spender)` allowance by the
+    /// same amount. Fails (without state change) if:
+    ///   - owner == recipient (self-transfer)
+    ///   - allowance is below `amount` (InsufficientAllowance)
+    ///   - owner's balance is below `amount` (Insufficient)
+    ///   - recipient's balance + `amount` overflows u128 (Overflow)
+    pub fn verified_transfer_from<S: Storage>(
+        storage:   &mut S,
+        spender:   &Addr,
+        owner:     &Addr,
+        recipient: &Addr,
+        amount:    u128,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    *owner != *recipient
+                    && balances_view(final(storage))
+                        == transfer_balances_map(balances_view(old(storage)), *owner, *recipient, amount)
+                    && supply_view(final(storage)) == supply_view(old(storage))
+                    && allowances_view(final(storage))
+                        == allowances_view(old(storage)).insert(
+                            (*owner, *spender),
+                            (allowance_at(allowances_view(old(storage)), *owner, *spender) - amount) as u128
+                        ),
+                Err(_) => true,
+            },
+    {
+        // Allowance check first (cheap, no state change on failure).
+        let current_allowance = ax_allowances_load(storage, owner, spender);
+        if current_allowance < amount {
+            return Err(TransferError::InsufficientAllowance);
+        }
+        // Do the transfer; on failure, allowance is unchanged.
+        match verified_transfer(storage, owner, recipient, amount) {
+            Ok(()) => {
+                // Transfer succeeded — decrement the allowance.
+                // We pass `current_allowance` (read before the transfer)
+                // because `ax_balances_save` preserves allowances_view,
+                // so the value is still current.
+                ax_allowances_save(storage, owner, spender, current_allowance - amount);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Refinement: the `u128`-level transfer (`transfer_balances_map`)
     /// matches the `nat`-level transfer (`core::state_after_transfer`'s
     /// `.balances`) when viewed through `nat_balances`, provided the
@@ -221,22 +316,26 @@ pub struct InstantiateMsg {
 
 #[cw_serde]
 pub enum ExecuteMsg {
-    Transfer { recipient: String, amount: Uint128 },
+    Transfer     { recipient: String, amount: Uint128 },
+    Approve      { spender:   String, amount: Uint128 },
+    TransferFrom { owner:     String, recipient: String, amount: Uint128 },
 }
 
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum QueryMsg {
-    #[returns(Uint128)] BalanceOf { account: String },
+    #[returns(Uint128)] BalanceOf   { account: String },
     #[returns(Uint128)] TotalSupply {},
+    #[returns(Uint128)] Allowance   { owner: String, spender: String },
 }
 
 #[derive(Error, Debug)]
 pub enum ContractError {
-    #[error("{0}")] Std(#[from] StdError),
-    #[error("insufficient balance")] Insufficient,
-    #[error("overflow")] Overflow,
-    #[error("self-transfer")] SelfTransfer,
+    #[error("{0}")]                       Std(#[from] StdError),
+    #[error("insufficient balance")]      Insufficient,
+    #[error("overflow")]                  Overflow,
+    #[error("self-transfer")]             SelfTransfer,
+    #[error("insufficient allowance")]    InsufficientAllowance,
 }
 
 /// Concrete wrapper around `&mut dyn Storage` so we can call the
@@ -272,38 +371,69 @@ pub fn instantiate(deps: DepsMut, _env: Env, info: MessageInfo, msg: Instantiate
     Ok(Response::new().add_attribute("action", "instantiate"))
 }
 
+fn map_transfer_error(e: TransferError) -> ContractError {
+    match e {
+        TransferError::SelfTransfer          => ContractError::SelfTransfer,
+        TransferError::Insufficient          => ContractError::Insufficient,
+        TransferError::Overflow              => ContractError::Overflow,
+        TransferError::InsufficientAllowance => ContractError::InsufficientAllowance,
+    }
+}
+
 #[entry_point]
 pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> Result<Response, ContractError> {
+    let mut store_ref = StoreRef(deps.storage);
     match msg {
         ExecuteMsg::Transfer { recipient, amount } => {
             let to = deps.api.addr_validate(&recipient)?;
-            // Wrap deps.storage so we can pass it to verified_transfer
-            // (which is generic over Sized storage types).
-            let mut store_ref = StoreRef(deps.storage);
-            match verified_transfer(&mut store_ref, &info.sender, &to, amount.u128()) {
-                Ok(()) => Ok(Response::new()
-                    .add_attribute("action", "transfer")
-                    .add_attribute("from", info.sender)
-                    .add_attribute("to", to)
-                    .add_attribute("amount", amount.to_string())),
-                Err(TransferError::SelfTransfer) => Err(ContractError::SelfTransfer),
-                Err(TransferError::Insufficient) => Err(ContractError::Insufficient),
-                Err(TransferError::Overflow)     => Err(ContractError::Overflow),
-            }
+            verified_transfer(&mut store_ref, &info.sender, &to, amount.u128())
+                .map_err(map_transfer_error)?;
+            Ok(Response::new()
+                .add_attribute("action", "transfer")
+                .add_attribute("from", info.sender)
+                .add_attribute("to", to)
+                .add_attribute("amount", amount.to_string()))
+        }
+        ExecuteMsg::Approve { spender, amount } => {
+            let spender_addr = deps.api.addr_validate(&spender)?;
+            verified_approve(&mut store_ref, &info.sender, &spender_addr, amount.u128());
+            Ok(Response::new()
+                .add_attribute("action", "approve")
+                .add_attribute("owner", info.sender)
+                .add_attribute("spender", spender_addr)
+                .add_attribute("amount", amount.to_string()))
+        }
+        ExecuteMsg::TransferFrom { owner, recipient, amount } => {
+            let owner_addr = deps.api.addr_validate(&owner)?;
+            let to         = deps.api.addr_validate(&recipient)?;
+            verified_transfer_from(&mut store_ref, &info.sender, &owner_addr, &to, amount.u128())
+                .map_err(map_transfer_error)?;
+            Ok(Response::new()
+                .add_attribute("action", "transfer_from")
+                .add_attribute("spender", info.sender)
+                .add_attribute("owner", owner_addr)
+                .add_attribute("to", to)
+                .add_attribute("amount", amount.to_string()))
         }
     }
 }
 
 #[entry_point]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+    let store_ref = StoreRefRead(deps.storage);
     match msg {
         QueryMsg::BalanceOf { account } => {
             let addr = deps.api.addr_validate(&account)?;
-            let store_ref = StoreRefRead(deps.storage);
             let b = verified_balance_of(&store_ref, &addr);
             to_json_binary(&Uint128::new(b))
         }
         QueryMsg::TotalSupply {} => to_json_binary(&TOTAL_SUPPLY.load(deps.storage)?),
+        QueryMsg::Allowance { owner, spender } => {
+            let owner_addr   = deps.api.addr_validate(&owner)?;
+            let spender_addr = deps.api.addr_validate(&spender)?;
+            let a = verified_allowance(&store_ref, &owner_addr, &spender_addr);
+            to_json_binary(&Uint128::new(a))
+        }
     }
 }
 
@@ -398,5 +528,88 @@ mod tests {
                 + balance(deps.as_ref(), &a.alice)
                 + balance(deps.as_ref(), &a.bob);
         assert_eq!(sum, total_supply(deps.as_ref()));
+    }
+
+    // ---- cw20-style allowance tests ----
+
+    fn allowance(deps: Deps, owner: &Addr, spender: &Addr) -> u128 {
+        let bin = query(deps, mock_env(),
+            QueryMsg::Allowance { owner: owner.to_string(), spender: spender.to_string() }).unwrap();
+        let amt: Uint128 = from_json(&bin).unwrap();
+        amt.u128()
+    }
+
+    fn approve(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, owner: &Addr, spender: &Addr, amount: u128) {
+        let info = message_info(owner, &[]);
+        let msg = ExecuteMsg::Approve { spender: spender.to_string(), amount: Uint128::new(amount) };
+        execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+    }
+
+    fn transfer_from(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, spender: &Addr, owner: &Addr, recipient: &Addr, amount: u128) -> Result<(), ContractError> {
+        let info = message_info(spender, &[]);
+        let msg = ExecuteMsg::TransferFrom {
+            owner: owner.to_string(),
+            recipient: recipient.to_string(),
+            amount: Uint128::new(amount),
+        };
+        execute(deps.as_mut(), mock_env(), info, msg).map(|_| ())
+    }
+
+    #[test]
+    fn approve_sets_allowance() {
+        let (mut deps, a) = setup(1_000);
+        assert_eq!(allowance(deps.as_ref(), &a.owner, &a.alice), 0);
+        approve(&mut deps, &a.owner, &a.alice, 250);
+        assert_eq!(allowance(deps.as_ref(), &a.owner, &a.alice), 250);
+    }
+
+    #[test]
+    fn approve_overwrites_previous_allowance() {
+        let (mut deps, a) = setup(1_000);
+        approve(&mut deps, &a.owner, &a.alice, 250);
+        approve(&mut deps, &a.owner, &a.alice, 100);
+        assert_eq!(allowance(deps.as_ref(), &a.owner, &a.alice), 100);
+    }
+
+    #[test]
+    fn transfer_from_happy_path() {
+        let (mut deps, a) = setup(1_000);
+        approve(&mut deps, &a.owner, &a.alice, 250);
+        transfer_from(&mut deps, &a.alice, &a.owner, &a.bob, 200).unwrap();
+        assert_eq!(balance(deps.as_ref(), &a.owner), 800);
+        assert_eq!(balance(deps.as_ref(), &a.bob), 200);
+        // Allowance decreased by exactly amount.
+        assert_eq!(allowance(deps.as_ref(), &a.owner, &a.alice), 50);
+    }
+
+    #[test]
+    fn transfer_from_insufficient_allowance() {
+        let (mut deps, a) = setup(1_000);
+        approve(&mut deps, &a.owner, &a.alice, 100);
+        let err = transfer_from(&mut deps, &a.alice, &a.owner, &a.bob, 200).unwrap_err();
+        assert!(matches!(err, ContractError::InsufficientAllowance));
+        // Allowance unchanged, balances unchanged.
+        assert_eq!(allowance(deps.as_ref(), &a.owner, &a.alice), 100);
+        assert_eq!(balance(deps.as_ref(), &a.owner), 1_000);
+        assert_eq!(balance(deps.as_ref(), &a.bob), 0);
+    }
+
+    #[test]
+    fn transfer_from_insufficient_balance_keeps_allowance() {
+        let (mut deps, a) = setup(50);
+        // Allowance is high but owner only has 50.
+        approve(&mut deps, &a.owner, &a.alice, 1_000);
+        let err = transfer_from(&mut deps, &a.alice, &a.owner, &a.bob, 200).unwrap_err();
+        assert!(matches!(err, ContractError::Insufficient));
+        // Allowance untouched on transfer failure.
+        assert_eq!(allowance(deps.as_ref(), &a.owner, &a.alice), 1_000);
+    }
+
+    #[test]
+    fn transfer_from_self_to_self_rejected() {
+        let (mut deps, a) = setup(1_000);
+        approve(&mut deps, &a.owner, &a.alice, 250);
+        let err = transfer_from(&mut deps, &a.alice, &a.owner, &a.owner, 100).unwrap_err();
+        assert!(matches!(err, ContractError::SelfTransfer));
     }
 }
