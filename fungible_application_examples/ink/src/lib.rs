@@ -1,7 +1,12 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
+// Chain-agnostic verified core (Layer 1): arithmetic + State<A> + conservation
+// lemmas. Lives outside the `#[ink::contract]` module so Verus can see it.
+pub mod core;
+
 #[ink::contract]
 mod fungible {
+    use crate::core as fcore;
     use ink::storage::Mapping;
 
     #[ink(storage)]
@@ -47,9 +52,13 @@ mod fungible {
             let from = self.env().caller();
             if from == to { return Err(Error::SelfTransfer); }
             let from_balance = self.balances.get(from).unwrap_or(0);
-            let from_next = from_balance.checked_sub(value).ok_or(Error::InsufficientBalance)?;
-            let to_balance = self.balances.get(to).unwrap_or(0);
-            let to_next = to_balance.checked_add(value).ok_or(Error::Overflow)?;
+            let to_balance   = self.balances.get(to).unwrap_or(0);
+            // Delegate the arithmetic to the Verus-verified core.
+            let (from_next, to_next) = fcore::transfer_balances(from_balance, to_balance, value)
+                .map_err(|msg| match msg {
+                    "insufficient balance" => Error::InsufficientBalance,
+                    _                      => Error::Overflow,
+                })?;
             self.balances.insert(from, &from_next);
             self.balances.insert(to, &to_next);
             self.env().emit_event(Transfer { from, to, value });

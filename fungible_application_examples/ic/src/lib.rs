@@ -33,7 +33,9 @@ use crate::ic_axioms::caller;
 #[derive(Default, CandidType, Deserialize)]
 pub struct State {
     pub total_supply: u128,
-    pub balances: BTreeMap<Principal, u128>,
+    pub balances:     BTreeMap<Principal, u128>,
+    pub allowances:   BTreeMap<(Principal, Principal), u128>,
+    pub minter:       Option<Principal>,
 }
 
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
@@ -54,6 +56,8 @@ vstd::prelude::verus! {
         SelfTransfer,
         Insufficient,
         Overflow,
+        InsufficientAllowance,
+        Unauthorized,
     }
 
     /// Balance of `k` in the abstract map, with absent entries treated as 0.
@@ -94,6 +98,29 @@ vstd::prelude::verus! {
         m.insert(k, v);
     }
 
+    /// Allowance at (owner, spender) — default 0 if absent.
+    pub open spec fn allowance_at(
+        m: SpecMap<(Principal, Principal), u128>,
+        owner: Principal,
+        spender: Principal,
+    ) -> u128 {
+        if m.dom().contains((owner, spender)) { m[(owner, spender)] } else { 0u128 }
+    }
+
+    #[verifier::external_body]
+    pub fn read_allowance(m: &BTreeMap<(Principal, Principal), u128>, owner: &Principal, spender: &Principal) -> (r: u128)
+        ensures r == allowance_at(m@, *owner, *spender),
+    {
+        m.get(&(*owner, *spender)).copied().unwrap_or(0)
+    }
+
+    #[verifier::external_body]
+    pub fn save_allowance(m: &mut BTreeMap<(Principal, Principal), u128>, owner: Principal, spender: Principal, v: u128)
+        ensures final(m)@ == old(m)@.insert((owner, spender), v),
+    {
+        m.insert((owner, spender), v);
+    }
+
     /// Verified transfer step: reads the caller via the axiomatized
     /// `caller()`, rejects self-transfer, then mutates the balances map.
     /// `ensures` describes the resulting state on the abstract view.
@@ -132,14 +159,248 @@ vstd::prelude::verus! {
             }
         }
     }
+
+    // -- Approve / TransferFrom ----------------------------------------
+
+    /// Set the (caller, spender) allowance to exactly `amount`.
+    pub fn verified_approve(
+        allowances: &mut BTreeMap<(Principal, Principal), u128>,
+        spender:    Principal,
+        amount:     u128,
+    )
+        ensures
+            final(allowances)@
+                == old(allowances)@.insert((the_caller(), spender), amount),
+    {
+        let owner = caller();
+        save_allowance(allowances, owner, spender, amount);
+    }
+
+    /// Move `amount` from `owner` to `recipient` using the caller's
+    /// allowance. On `Ok`: balances updated, allowance decremented. On
+    /// `Err`: state unchanged.
+    pub fn verified_transfer_from(
+        balances:   &mut BTreeMap<Principal, u128>,
+        allowances: &mut BTreeMap<(Principal, Principal), u128>,
+        owner:      Principal,
+        recipient:  Principal,
+        amount:     u128,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    owner != recipient
+                    && final(balances)@
+                        == transfer_balances_map(old(balances)@, owner, recipient, amount)
+                    && final(allowances)@
+                        == old(allowances)@.insert(
+                            (owner, the_caller()),
+                            (allowance_at(old(allowances)@, owner, the_caller()) - amount) as u128,
+                        ),
+                Err(_) => true,
+            },
+    {
+        let spender = caller();
+        if owner == recipient {
+            return Err(TransferError::SelfTransfer);
+        }
+        let current_allowance = read_allowance(allowances, &owner, &spender);
+        if current_allowance < amount {
+            return Err(TransferError::InsufficientAllowance);
+        }
+        let from = read_balance(balances, &owner);
+        let to   = read_balance(balances, &recipient);
+        match crate::core::transfer_balances(from, to, amount) {
+            Ok((from_next, to_next)) => {
+                save_balance(balances, owner, from_next);
+                proof {
+                    assert(balance_at(balances@, recipient) == to);
+                }
+                save_balance(balances, recipient, to_next);
+                save_allowance(allowances, owner, spender, current_allowance - amount);
+                Ok(())
+            }
+            Err(_msg) => {
+                if from < amount { Err(TransferError::Insufficient) }
+                else             { Err(TransferError::Overflow) }
+            }
+        }
+    }
+
+    // -- Mint / Burn ---------------------------------------------------
+
+    /// Mint `amount` to `to`. Caller must be the registered minter.
+    pub fn verified_mint(
+        balances:     &mut BTreeMap<Principal, u128>,
+        total_supply: &mut u128,
+        minter:       &Option<Principal>,
+        to:           Principal,
+        amount:       u128,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    *minter == Some(the_caller())
+                    && *final(total_supply) == (*old(total_supply) + amount) as u128
+                    && final(balances)@
+                        == old(balances)@.insert(
+                            to,
+                            (balance_at(old(balances)@, to) + amount) as u128,
+                        ),
+                Err(_) => true,
+            },
+    {
+        let c = caller();
+        // Authorization: caller must be the registered minter.
+        let is_minter = match minter {
+            Some(m) => *m == c,
+            None    => false,
+        };
+        if !is_minter {
+            return Err(TransferError::Unauthorized);
+        }
+        let new_supply = match total_supply.checked_add(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Overflow),
+        };
+        let bal = read_balance(balances, &to);
+        let new_bal = match bal.checked_add(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Overflow),
+        };
+        *total_supply = new_supply;
+        save_balance(balances, to, new_bal);
+        Ok(())
+    }
+
+    /// Burn `amount` from the caller's balance.
+    pub fn verified_burn(
+        balances:     &mut BTreeMap<Principal, u128>,
+        total_supply: &mut u128,
+        amount:       u128,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    *final(total_supply) == (*old(total_supply) - amount) as u128
+                    && final(balances)@
+                        == old(balances)@.insert(
+                            the_caller(),
+                            (balance_at(old(balances)@, the_caller()) - amount) as u128,
+                        ),
+                Err(_) => true,
+            },
+    {
+        let from = caller();
+        let bal = read_balance(balances, &from);
+        let new_bal = match bal.checked_sub(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Insufficient),
+        };
+        let new_supply = match total_supply.checked_sub(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Insufficient),
+        };
+        *total_supply = new_supply;
+        save_balance(balances, from, new_bal);
+        Ok(())
+    }
+
+    // -- Allowance delta -----------------------------------------------
+
+    pub fn verified_increase_allowance(
+        allowances: &mut BTreeMap<(Principal, Principal), u128>,
+        spender:    Principal,
+        amount:     u128,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    final(allowances)@
+                        == old(allowances)@.insert(
+                            (the_caller(), spender),
+                            (allowance_at(old(allowances)@, the_caller(), spender) + amount) as u128,
+                        ),
+                Err(_) => true,
+            },
+    {
+        let owner = caller();
+        let current = read_allowance(allowances, &owner, &spender);
+        match current.checked_add(amount) {
+            Some(new) => {
+                save_allowance(allowances, owner, spender, new);
+                Ok(())
+            }
+            None => Err(TransferError::Overflow),
+        }
+    }
+
+    pub fn verified_decrease_allowance(
+        allowances: &mut BTreeMap<(Principal, Principal), u128>,
+        spender:    Principal,
+        amount:     u128,
+    )
+        ensures
+            final(allowances)@
+                == old(allowances)@.insert(
+                    (the_caller(), spender),
+                    if allowance_at(old(allowances)@, the_caller(), spender) >= amount {
+                        (allowance_at(old(allowances)@, the_caller(), spender) - amount) as u128
+                    } else {
+                        0u128
+                    },
+                ),
+    {
+        let owner = caller();
+        let current = read_allowance(allowances, &owner, &spender);
+        let new = if current >= amount { current - amount } else { 0u128 };
+        save_allowance(allowances, owner, spender, new);
+    }
+
+    // -- Update minter --------------------------------------------------
+
+    pub fn verified_update_minter(
+        minter:     &mut Option<Principal>,
+        new_minter: Principal,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    *old(minter) == Some(the_caller())
+                    && *final(minter) == Some(new_minter),
+                Err(_) => true,
+            },
+    {
+        let c = caller();
+        let is_minter = match minter {
+            Some(m) => *m == c,
+            None    => false,
+        };
+        if !is_minter {
+            return Err(TransferError::Unauthorized);
+        }
+        *minter = Some(new_minter);
+        Ok(())
+    }
+}
+
+fn err_to_string(e: TransferError) -> String {
+    match e {
+        TransferError::SelfTransfer          => "self-transfer".into(),
+        TransferError::Insufficient          => "insufficient balance".into(),
+        TransferError::Overflow              => "balance overflow".into(),
+        TransferError::InsufficientAllowance => "insufficient allowance".into(),
+        TransferError::Unauthorized          => "unauthorized".into(),
+    }
 }
 
 #[init]
-fn init(owner: Principal, total_supply: u128) {
+fn init(owner: Principal, total_supply: u128, minter: Option<Principal>) {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         state.total_supply = total_supply;
         state.balances.insert(owner, total_supply);
+        state.minter = Some(minter.unwrap_or(owner));
     });
 }
 
@@ -153,16 +414,80 @@ fn total_supply() -> u128 {
     STATE.with(|s| s.borrow().total_supply)
 }
 
+#[query]
+fn allowance(owner: Principal, spender: Principal) -> u128 {
+    STATE.with(|s| s.borrow().allowances.get(&(owner, spender)).copied().unwrap_or(0))
+}
+
+#[query]
+fn minter() -> Option<Principal> {
+    STATE.with(|s| s.borrow().minter)
+}
+
 #[update]
 fn transfer(to: Principal, amount: u128) -> Result<(), String> {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
-        match verified_transfer(&mut state.balances, to, amount) {
-            Ok(())                                 => Ok(()),
-            Err(TransferError::SelfTransfer)       => Err("self-transfer".into()),
-            Err(TransferError::Insufficient)       => Err("insufficient balance".into()),
-            Err(TransferError::Overflow)           => Err("balance overflow".into()),
-        }
+        verified_transfer(&mut state.balances, to, amount).map_err(err_to_string)
+    })
+}
+
+#[update]
+fn approve(spender: Principal, amount: u128) {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        verified_approve(&mut state.allowances, spender, amount);
+    });
+}
+
+#[update]
+fn transfer_from(owner: Principal, recipient: Principal, amount: u128) -> Result<(), String> {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let State { balances, allowances, .. } = &mut *state;
+        verified_transfer_from(balances, allowances, owner, recipient, amount).map_err(err_to_string)
+    })
+}
+
+#[update]
+fn mint(to: Principal, amount: u128) -> Result<(), String> {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let State { balances, total_supply, minter, .. } = &mut *state;
+        verified_mint(balances, total_supply, minter, to, amount).map_err(err_to_string)
+    })
+}
+
+#[update]
+fn burn(amount: u128) -> Result<(), String> {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let State { balances, total_supply, .. } = &mut *state;
+        verified_burn(balances, total_supply, amount).map_err(err_to_string)
+    })
+}
+
+#[update]
+fn increase_allowance(spender: Principal, amount: u128) -> Result<(), String> {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        verified_increase_allowance(&mut state.allowances, spender, amount).map_err(err_to_string)
+    })
+}
+
+#[update]
+fn decrease_allowance(spender: Principal, amount: u128) {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        verified_decrease_allowance(&mut state.allowances, spender, amount);
+    });
+}
+
+#[update]
+fn update_minter(new_minter: Principal) -> Result<(), String> {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        verified_update_minter(&mut state.minter, new_minter).map_err(err_to_string)
     })
 }
 
