@@ -1,0 +1,31 @@
+[package]
+name = "fungible"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+test = []
+
+[dependencies]
+async-graphql = { version = "=7.0.17", features = ["raw_value"] }
+futures = "0.3.30"
+serde = { version = "1.0.197", features = ["derive"] }
+linera-sdk = { git = "https://github.com/MathieuDutSik/linera-protocol_second", branch = "alternate_sync_keyvaluestore" }
+vstd = { version = "=0.0.0-2026-05-17-0151", default-features = false, features = ["alloc"] }
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+serde-reflection = "0.5.2"
+
+[[bin]]
+name = "fungible_contract"
+path = "src/contract.rs"
+
+[[bin]]
+name = "fungible_service"
+path = "src/service.rs"

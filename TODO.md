@@ -210,23 +210,98 @@ where we name our verified module `core`.
 
 ### Linera
 
-Verification work not started. With the user's planned sync-SDK
-variant (no `async`/`await`), the View framework (`MapView`, `RegisterView`)
-becomes the main storage-axiomatization work. The microchain message
-model is the harder semantic piece — see "Sub-message" section above.
+Two variants live side-by-side:
+
+- `fungible_application_examples/linera/` — classic async SDK. **Not
+  verified.** The `async`/`await` View API (`MapView::insert(...).await`)
+  is the main blocker; Verus has no spec model for async storage handles.
+  The microchain message model is the harder semantic piece — see
+  "Sub-message" section above.
+
+- `fungible_application_examples/linera_alternate/` — uses the user's
+  sync SDK variant
+  (`MathieuDutSik/linera-protocol_second` branch
+  `alternate_sync_keyvaluestore`, exposing `SyncMapView` /
+  `SyncViewStorageContext` / `SyncRootView`). **Shallow port: 15
+  verified, 0 errors.**
+
+| component | status |
+|---|---|
+| chain-agnostic `core::State<A>` (transfer + mint + burn + conservation lemmas) | ✅ 9 obligations |
+| `verified_helpers.rs` (allowance/transfer_from u128 kernels matching `state.rs`) | ✅ 6 obligations |
+| `Amount` external type spec | not done |
+| `SyncMapView<K,V>` external type spec + read/write axioms | not done |
+| State-layer integration (lifting kernel proofs to `FungibleTokenState::credit`, `debit`, `approve`, `debit_for_transfer_from`) | not done |
+| Cross-microchain `Message::Credit` / `Message::Withdraw` semantics | not done — sub-message blocker |
+
+What today's 15 obligations buy us:
+- The arithmetic kernels that `state.rs` reduces to (after stripping
+  `Amount` and `SyncMapView`) are proven: no underflow on debit, no
+  overflow on credit, allowance correctly decremented in `transfer_from`,
+  and (from `core.rs`) `from + to` is conserved across a transfer.
+- Same "shallow port" tier as ink!/MultiversX. Linera_alternate is the
+  best-positioned chain for *deeper* verification because the sync API
+  removes the async-storage blocker entirely.
+
+Path to lifting to the full state-layer:
+1. Add `external_type_specification` wrappers for `Amount` (u128
+   newtype) and `OwnerSpender`.
+2. Axiomatize `SyncMapView<K,V>` via a ghost-view function projecting
+   it to `vstd::map::Map<K,V>`, plus `assume_specification` on
+   `get`/`insert`/`remove`/`get_mut_or_default`.
+3. Re-state `state.rs` methods with `ensures` that connect to the
+   `core::State<A>` invariants — should be mechanical once (1)+(2)
+   land.
 
 ### Solana
 
 | component | status |
 |---|---|
-| arithmetic helpers (`apply_transfer`, `apply_init_mint`, etc.) | already factored in source; verifying next |
-| Account model (state in raw byte buffers) | needs axiomatization |
-| Instruction dispatch & signer/owner checks | will be the substantive verification surface |
+| arithmetic + allowance + mint/burn at `apply_*` layer | ✅ verified (16 obligations) |
+| `AccountInfo` external type + ghost views (`ai_signed`, `ai_key`, `ai_token_data`, `ai_mint_data`) | ✅ axiomatized |
+| Borsh round-trip wrapped via `read_*`/`write_*_data` axioms | ✅ axiomatized (trusted) |
+| `verified_transfer_instruction` — dispatch-level verification | ✅ partial (see below) |
+| Other 6 instructions wrapped with `verified_*_instruction` | not done; replicate `transfer`'s pattern |
+| Framing layer over `ai_token_data` (writeback effect on other accounts) | **not done** — Verus's pure-function model can't track this without explicit state |
+| PDA verification | skipped (not needed for self-contained fungible token) |
+| CPI modeling | skipped (no outbound CPI in this contract) |
+| Rent | skipped (apply-layer preconditions only) |
 
-Account-buffer + position-based dispatch is structurally different
-from per-instance struct state. Expected effort: larger than
-NEAR/CosmWasm/IC but not categorically harder — different shape, not
-new mathematical content.
+#### What `verified_transfer_instruction` does and doesn't guarantee
+
+What we get today:
+- Verus rejects any version that doesn't `read_is_signer(accounts[0])` before
+  proceeding. → "missing signer check" bug class structurally impossible.
+- Verus rejects any version that doesn't `accounts.len() >= 3`. → "off-by-one
+  arg count" bug class structurally impossible.
+- The `apply_transfer` inside has its own verified ensures (conservation,
+  signer-owner match, distinct receiver) — those properties are proven for
+  the local `TokenAccount` values we read and mutate.
+
+What we don't yet get:
+- The post-state `ensures` only states `accounts.len() >= 3 && ai_signed(...)`.
+  We can't state `ai_token_data(&accounts[1]).owner == ai_key(&accounts[0])`
+  at the dispatch level because that requires framing — "writing to account A
+  doesn't change account B's view." Verus's uninterpreted spec-function model
+  treats `ai_token_data` as a pure function (same input → same output);
+  there's no implicit notion of "state changed between two calls."
+- We don't formally verify that the writeback goes to the *same* `AccountInfo`
+  we read from. By inspection of the 6-line glue body this is correct, but
+  it's not in the Verus proof.
+
+#### Path to closing the gap
+
+1. **Framing layer** (~1 week): introduce a "world state" parameter or
+   `tracked` ghost machinery so writes to account A have an explicit
+   "preserves account B" axiom. Re-state `verified_transfer_instruction`'s
+   ensures with full post-state properties.
+2. **Replicate to all 7 instructions** (~1 week): mechanical.
+3. **Total honest estimate**: ~2–3 weeks of focused work to fully close
+   Solana steps 1 + 2 as originally scoped.
+
+Today's iteration accomplished about 30–40 % of step 1: the dispatch-level
+signer/length checks (the two most common Solana exploit classes) are
+covered, but the full state-tracked post-condition isn't yet.
 
 ## Infrastructure
 
