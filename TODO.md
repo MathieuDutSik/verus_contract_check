@@ -113,27 +113,120 @@ Both are deferred; the line itself is dispatch, no logic.
 | `Send` variant (callback-bearing transfer) | not implemented (see sub-message section above) |
 | IBC | not modelled |
 
-### Solana, Linera, IC, Gear, ink!, MultiversX
+### IC
 
-Verification work not yet started. Plan: port the NEAR/CosmWasm pattern,
-attack chain-specific axiomatization challenges as they arise.
+| component | status |
+|---|---|
+| arithmetic + State conservation | ✅ verified |
+| storage wrappers (`read_balance`/`save_balance` over BTreeMap) | ✅ verified |
+| caller resolution via axiomatized `caller()` | ✅ verified |
+| cw20 surface (transfer/approve/transfer_from/mint/burn/inc/dec/update_minter) | ✅ verified |
+| State-level refinement to `core::state_after_*` | not done (could be added; mechanical) |
+| Inter-canister calls (Promise-equivalent) | not modelled |
 
-#### Per-chain hard parts we expect
+### Gear
 
-- **Solana**: account model (state in raw byte buffers, not per-instance
-  structs); each instruction takes a `&[AccountInfo]` and must validate
-  ordering/permissions. Axiomatization is heavier than NEAR/CosmWasm.
-- **Linera**: View framework + cross-microchain messages + async by
-  default. With a sync SDK variant (user-supplied), View framework
-  becomes the main axiomatization work.
-- **IC**: `caller()` is env-based (like NEAR), state is in `thread_local!`
-  (like NEAR). Should be a relatively straightforward port.
-- **Gear**: actor / message-handler model; verifying the handler dispatch
-  layer is the work.
-- **ink!**: `#[ink::contract]` macro wraps the entire module; factoring
-  out a verified core requires careful module organisation.
-- **MultiversX**: trait-based contract macro is invasive; types
-  (`BigUint`, `ManagedAddress`, `SingleValueMapper`) are framework-bound.
+| component | status |
+|---|---|
+| arithmetic + State conservation | ✅ verified |
+| storage wrapper (`AxHashMap`) | ✅ verified |
+| caller resolution via axiomatized `msg::source()` | ✅ verified |
+| `verified_transfer` | ✅ verified |
+| `extern "C" fn handle()` dispatch | unverified (touches `static mut`, `msg::*`) |
+| cw20 surface | not implemented |
+
+### ink!
+
+| component | status |
+|---|---|
+| arithmetic + State conservation | ✅ verified |
+| arithmetic helpers used by contract (transfer, mint, burn) | ✅ verified |
+| storage refinement on `ink::storage::Mapping` | **not done** — see Mapping gap below |
+| caller resolution via `Self::env().caller()` | not axiomatized |
+| `Self::env().emit_event(...)` | not modelled |
+
+#### Mapping refinement gap on ink!
+
+`ink::storage::Mapping<K, V, KT>` has three trait bounds: `K: Storable`,
+`V: Storable`, `KT: StorageKey`. Each is an ink-specific trait with its
+own methods (`encode`, `decode`, `encoded_size`, plus dependent
+`scale::Encode`/`Decode`/etc.). Axiomatizing the chain involves writing
+external_trait_specifications for all of them.
+
+Also, when used inside `#[ink(storage)]`, the macro assigns `KT = AutoKey`
+which Verus can't directly reason about; a wrapper would need `ManualKey<K>`
+with the same hash the macro would compute.
+
+Effort to fill: 1–2 weeks. Approach: wrap `Mapping` in `AxInkMapping`
+(parallel to NEAR's `AxLookupMap`), add `external_trait_specification`
+for `Storable` / `StorageKey`, port the storage axioms over.
+
+### MultiversX
+
+| component | status |
+|---|---|
+| arithmetic + State conservation | ✅ verified |
+| contract logic (uses `BigUint`/`ManagedAddress`/`SingleValueMapper`) | **unverified** — see BigUint gap below |
+| caller resolution via `self.blockchain().get_caller()` | not axiomatized |
+
+#### BigUint vs `u128` impedance on MultiversX
+
+`multiversx_sc::types::BigUint` is **unbounded** (heap-allocated
+arbitrary-precision integer). Our verified `core::transfer_balances`
+takes `u128`. So:
+
+- A naive bridge "convert `BigUint` to `u128`" can silently lose data
+  for amounts beyond `u128::MAX`. Not acceptable for a token contract.
+- The honest fix is to either: (a) axiomatize `BigUint` arithmetic as
+  spec-level unbounded `int`/`nat` operations; or (b) duplicate
+  `core::transfer_balances` to operate on `BigUint` rather than `u128`.
+
+Effort to fill: substantial. `BigUint` has a large surface
+(`+`/`-`/`*`/`/`, comparisons, conversions, encoding) and lives behind
+the framework's "managed types" indirection. We'd need
+`external_trait_specification` for managed buffers, plus a Verus-aware
+arithmetic model that matches the runtime's behaviour.
+
+In the meantime: MultiversX's chain-agnostic `core.rs` does verify
+(7 obligations), and the lemmas about `State<A>` are available — they
+just aren't connected to the actual contract's BigUint arithmetic.
+
+#### Dependency-version surprise (proc-macro2 conflict)
+
+`multiversx-sc 0.54` pinned `proc-macro2 = "=1.0.86"` exactly, which
+collides with `verus_syn`'s `^1.0.101`. Bumping to `multiversx-sc 0.66`
+relaxed the pin and resolved it. Lesson: pre-pre-1.0 SDK versions
+sometimes have tight transitive pins that conflict with Verus's own
+proc-macro stack; using a recent SDK release usually fixes it.
+
+#### Module-name shadowing surprise
+
+`pub mod core;` inside a `#[multiversx_sc::contract]` module shadows
+the standard `::core` library that the macro expansion uses
+(`::core::mem`). Workaround: rename the module — we used
+`#[path = "core.rs"] pub mod fungible_core;`. Same shadowing problem
+will recur on any chain whose macros reference `::core` paths and
+where we name our verified module `core`.
+
+### Linera
+
+Verification work not started. With the user's planned sync-SDK
+variant (no `async`/`await`), the View framework (`MapView`, `RegisterView`)
+becomes the main storage-axiomatization work. The microchain message
+model is the harder semantic piece — see "Sub-message" section above.
+
+### Solana
+
+| component | status |
+|---|---|
+| arithmetic helpers (`apply_transfer`, `apply_init_mint`, etc.) | already factored in source; verifying next |
+| Account model (state in raw byte buffers) | needs axiomatization |
+| Instruction dispatch & signer/owner checks | will be the substantive verification surface |
+
+Account-buffer + position-based dispatch is structurally different
+from per-instance struct state. Expected effort: larger than
+NEAR/CosmWasm/IC but not categorically harder — different shape, not
+new mathematical content.
 
 ## Infrastructure
 

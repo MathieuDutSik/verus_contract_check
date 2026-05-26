@@ -4,9 +4,80 @@
 // lemmas. Lives outside the `#[ink::contract]` module so Verus can see it.
 pub mod core;
 
+// Verified helpers — operate on plain values; no ink-storage primitives
+// involved (those would need a separate axiomatization layer; see TODO.md).
+// The helpers cover the mint/burn arithmetic + supply update; transfer's
+// arithmetic is already covered by `core::transfer_balances`.
+vstd::prelude::verus! {
+    #[cfg(verus_only)]
+    use vstd::prelude::*;
+
+    /// Failure modes shared by transfer/mint/burn helpers.
+    #[derive(PartialEq, Eq)]
+    pub enum TransferError {
+        SelfTransfer,
+        InsufficientBalance,
+        Overflow,
+        InsufficientSupply,
+    }
+
+    /// Verified mint arithmetic: `to_balance' = to_balance + amount` and
+    /// `total_supply' = total_supply + amount` on success.
+    pub fn verified_mint_step(
+        to_balance:   u128,
+        total_supply: u128,
+        amount:       u128,
+    ) -> (r: Result<(u128, u128), TransferError>)
+        ensures
+            match r {
+                Ok((new_bal, new_supply)) =>
+                    new_bal    == (to_balance   + amount) as u128
+                    && new_supply == (total_supply + amount) as u128,
+                Err(_) => true,
+            },
+    {
+        let new_supply = match total_supply.checked_add(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Overflow),
+        };
+        let new_bal = match to_balance.checked_add(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::Overflow),
+        };
+        Ok((new_bal, new_supply))
+    }
+
+    /// Verified burn arithmetic: `from_balance' = from_balance - amount` and
+    /// `total_supply' = total_supply - amount` on success.
+    pub fn verified_burn_step(
+        from_balance: u128,
+        total_supply: u128,
+        amount:       u128,
+    ) -> (r: Result<(u128, u128), TransferError>)
+        ensures
+            match r {
+                Ok((new_bal, new_supply)) =>
+                    new_bal      == (from_balance - amount) as u128
+                    && new_supply == (total_supply - amount) as u128,
+                Err(_) => true,
+            },
+    {
+        let new_bal = match from_balance.checked_sub(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::InsufficientBalance),
+        };
+        let new_supply = match total_supply.checked_sub(amount) {
+            Some(v) => v,
+            None    => return Err(TransferError::InsufficientSupply),
+        };
+        Ok((new_bal, new_supply))
+    }
+}
+
 #[ink::contract]
 mod fungible {
     use crate::core as fcore;
+    use crate::{verified_mint_step, verified_burn_step, TransferError as TE};
     use ink::storage::Mapping;
 
     #[ink(storage)]
@@ -21,6 +92,16 @@ mod fungible {
         InsufficientBalance,
         Overflow,
         SelfTransfer,
+        InsufficientSupply,
+    }
+
+    fn map_err(e: TE) -> Error {
+        match e {
+            TE::SelfTransfer        => Error::SelfTransfer,
+            TE::InsufficientBalance => Error::InsufficientBalance,
+            TE::Overflow            => Error::Overflow,
+            TE::InsufficientSupply  => Error::InsufficientSupply,
+        }
     }
 
     #[ink(event)]
@@ -62,6 +143,31 @@ mod fungible {
             self.balances.insert(from, &from_next);
             self.balances.insert(to, &to_next);
             self.env().emit_event(Transfer { from, to, value });
+            Ok(())
+        }
+
+        /// Mint `amount` tokens to `to`. No authorization check (would be
+        /// added in a real cw20-like contract by storing a Minter address).
+        #[ink(message)]
+        pub fn mint(&mut self, to: AccountId, amount: Balance) -> Result<(), Error> {
+            let to_balance = self.balances.get(to).unwrap_or(0);
+            // Delegate the verified arithmetic (supply + balance both update).
+            let (new_balance, new_supply) =
+                verified_mint_step(to_balance, self.total_supply, amount).map_err(map_err)?;
+            self.total_supply = new_supply;
+            self.balances.insert(to, &new_balance);
+            Ok(())
+        }
+
+        /// Burn `amount` from the caller's balance.
+        #[ink(message)]
+        pub fn burn(&mut self, amount: Balance) -> Result<(), Error> {
+            let from = self.env().caller();
+            let from_balance = self.balances.get(from).unwrap_or(0);
+            let (new_balance, new_supply) =
+                verified_burn_step(from_balance, self.total_supply, amount).map_err(map_err)?;
+            self.total_supply = new_supply;
+            self.balances.insert(from, &new_balance);
             Ok(())
         }
     }
@@ -129,6 +235,41 @@ mod fungible {
             }
             let sum = f.balance_of(a.alice) + f.balance_of(a.bob) + f.balance_of(a.charlie);
             assert_eq!(sum, f.total_supply());
+        }
+
+        #[ink::test]
+        fn mint_increases_supply_and_balance() {
+            let (mut f, a) = setup(1_000);
+            f.mint(a.bob, 250).unwrap();
+            assert_eq!(f.total_supply(), 1_250);
+            assert_eq!(f.balance_of(a.bob), 250);
+            assert_eq!(f.balance_of(a.alice), 1_000); // unchanged
+        }
+
+        #[ink::test]
+        fn burn_decreases_supply_and_balance() {
+            let (mut f, a) = setup(1_000);
+            set_caller(a.alice);
+            f.burn(250).unwrap();
+            assert_eq!(f.total_supply(), 750);
+            assert_eq!(f.balance_of(a.alice), 750);
+        }
+
+        #[ink::test]
+        fn burn_insufficient_balance() {
+            let (mut f, a) = setup(100);
+            set_caller(a.alice);
+            assert_eq!(f.burn(200), Err(Error::InsufficientBalance));
+        }
+
+        #[ink::test]
+        fn mint_burn_round_trip_preserves_supply() {
+            let (mut f, a) = setup(1_000);
+            f.mint(a.bob, 250).unwrap();
+            set_caller(a.bob);
+            f.burn(250).unwrap();
+            assert_eq!(f.total_supply(), 1_000);
+            assert_eq!(f.balance_of(a.bob), 0);
         }
     }
 }
