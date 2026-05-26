@@ -40,6 +40,7 @@ use cw_storage_plus::{Item, Map};
 pub const BALANCES:     Map<&Addr, Uint128>             = Map::new("balances");
 pub const TOTAL_SUPPLY: Item<Uint128>                   = Item::new("total_supply");
 pub const ALLOWANCES:   Map<(&Addr, &Addr), Uint128>    = Map::new("allowances");
+pub const MINTER:       Item<Addr>                      = Item::new("minter");
 
 verus! {
 
@@ -84,6 +85,9 @@ pub uninterp spec fn supply_view<S: Storage>(storage: &S) -> u128;
 /// `ALLOWANCES` map.
 pub uninterp spec fn allowances_view<S: Storage>(storage: &S) -> SpecMap<(Addr, Addr), u128>;
 
+/// The current minter, if set. `None` means no minter (mint disabled).
+pub uninterp spec fn minter_view<S: Storage>(storage: &S) -> Option<Addr>;
+
 // -- Balance reads ------------------------------------------------------
 
 /// Read the balance of `k`, treating absent entries as 0.
@@ -109,14 +113,15 @@ pub fn ax_balances_has<S: Storage>(storage: &S, k: &Addr) -> (r: bool)
 
 // -- Balance writes -----------------------------------------------------
 
-/// Point insert / overwrite. Touches the balances map only; supply and
-/// allowances are unchanged.
+/// Point insert / overwrite. Touches the balances map only; supply,
+/// allowances, and minter are unchanged.
 #[verifier::external_body]
 pub fn ax_balances_save<S: Storage>(storage: &mut S, k: &Addr, v: u128)
     ensures
         balances_view(final(storage))   == balances_view(old(storage)).insert(*k, v),
         supply_view(final(storage))     == supply_view(old(storage)),
         allowances_view(final(storage)) == allowances_view(old(storage)),
+        minter_view(final(storage))     == minter_view(old(storage)),
 {
     BALANCES.save(storage, k, &Uint128::new(v)).unwrap()
 }
@@ -136,6 +141,7 @@ pub fn ax_supply_save<S: Storage>(storage: &mut S, v: u128)
         supply_view(final(storage))     == v,
         balances_view(final(storage))   == balances_view(old(storage)),
         allowances_view(final(storage)) == allowances_view(old(storage)),
+        minter_view(final(storage))     == minter_view(old(storage)),
 {
     TOTAL_SUPPLY.save(storage, &Uint128::new(v)).unwrap()
 }
@@ -156,7 +162,7 @@ pub fn ax_allowances_load<S: Storage>(storage: &S, owner: &Addr, spender: &Addr)
 }
 
 /// Set the allowance `(owner, spender) → amount`. Touches allowances
-/// only; balances and supply are unchanged.
+/// only; balances, supply, and minter are unchanged.
 #[verifier::external_body]
 pub fn ax_allowances_save<S: Storage>(storage: &mut S, owner: &Addr, spender: &Addr, amount: u128)
     ensures
@@ -164,8 +170,31 @@ pub fn ax_allowances_save<S: Storage>(storage: &mut S, owner: &Addr, spender: &A
             == allowances_view(old(storage)).insert((*owner, *spender), amount),
         balances_view(final(storage)) == balances_view(old(storage)),
         supply_view(final(storage))   == supply_view(old(storage)),
+        minter_view(final(storage))   == minter_view(old(storage)),
 {
     ALLOWANCES.save(storage, (owner, spender), &Uint128::new(amount)).unwrap()
+}
+
+// -- Minter -------------------------------------------------------------
+
+/// Read the current minter, if set.
+#[verifier::external_body]
+pub fn ax_minter_load<S: Storage>(storage: &S) -> (r: Option<Addr>)
+    ensures r == minter_view(storage),
+{
+    MINTER.may_load(storage).unwrap()
+}
+
+/// Set the minter. Touches minter only; balances, supply, allowances unchanged.
+#[verifier::external_body]
+pub fn ax_minter_save<S: Storage>(storage: &mut S, addr: &Addr)
+    ensures
+        minter_view(final(storage))     == Some(*addr),
+        balances_view(final(storage))   == balances_view(old(storage)),
+        supply_view(final(storage))     == supply_view(old(storage)),
+        allowances_view(final(storage)) == allowances_view(old(storage)),
+{
+    MINTER.save(storage, addr).unwrap()
 }
 
 } // verus!

@@ -12,6 +12,14 @@ ic-cdk = "0.16"
 ic-cdk-macros = "0.16"
 ic-stable-structures = "0.6"
 serde = { version = "1", features = ["derive"] }
+vstd = "=0.0.0-2026-05-17-0151"
+
+[package.metadata.verus]
+verify = true
+
+# Allow the verus_only cfg that `cargo verus` sets during verification.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
 
 [profile.release]
 overflow-checks = true

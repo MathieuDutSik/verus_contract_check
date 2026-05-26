@@ -14,6 +14,7 @@ use crate::cw_axioms::{
     TOTAL_SUPPLY,
     ax_balances_load, ax_balances_save, ax_supply_load, ax_supply_save,
     ax_allowances_load, ax_allowances_save,
+    ax_minter_load, ax_minter_save,
 };
 
 // -- Verified transfer helper ------------------------------------------
@@ -30,7 +31,7 @@ vstd::prelude::verus! {
     #[cfg(verus_only)]
     use vstd::map::Map as SpecMap;
     #[cfg(verus_only)]
-    use crate::cw_axioms::{balances_view, supply_view, allowances_view};
+    use crate::cw_axioms::{balances_view, supply_view, allowances_view, minter_view};
 
     /// Failure modes of `verified_transfer` / `verified_transfer_from`.
     /// Mirrors the runtime `ContractError` but is closed (no `Std`
@@ -41,6 +42,7 @@ vstd::prelude::verus! {
         Insufficient,
         Overflow,
         InsufficientAllowance,
+        Unauthorized,
     }
 
     /// Balance of `k` in the abstract map, with absent entries treated as 0.
@@ -63,6 +65,11 @@ vstd::prelude::verus! {
     /// `transfer_balances_map` on success, leaves storage untouched on
     /// error. `supply_view` and `allowances_view` are preserved either
     /// way (transfers only touch balances).
+    ///
+    /// On success, when both `sender` and `receiver` are present in the
+    /// pre-state, the storage update also matches `core::state_after_transfer`'s
+    /// balance field (via `lemma_verified_transfer_matches_state`), so
+    /// callers can chain to the core conservation theorem.
     pub fn verified_transfer<S: Storage>(
         storage:  &mut S,
         sender:   &Addr,
@@ -76,7 +83,20 @@ vstd::prelude::verus! {
                     && balances_view(final(storage))
                         == transfer_balances_map(balances_view(old(storage)), *sender, *receiver, amount)
                     && supply_view(final(storage))     == supply_view(old(storage))
-                    && allowances_view(final(storage)) == allowances_view(old(storage)),
+                    && allowances_view(final(storage)) == allowances_view(old(storage))
+                    // State-level connection (conditional on lemma's preconditions).
+                    && (balances_view(old(storage)).dom().contains(*sender)
+                        && balances_view(old(storage)).dom().contains(*receiver)
+                        && balances_view(old(storage))[*receiver] as int + amount as int <= u128::MAX as int
+                        ==>
+                        nat_balances(balances_view(final(storage)))
+                            == crate::core::state_after_transfer(
+                                crate::core::State {
+                                    total_supply: 0nat,
+                                    balances:     nat_balances(balances_view(old(storage))),
+                                },
+                                *sender, *receiver, amount as nat,
+                            ).balances),
                 Err(_) => true,
             },
     {
@@ -86,21 +106,27 @@ vstd::prelude::verus! {
         let from = ax_balances_load(storage, sender);
         let to   = ax_balances_load(storage, receiver);
         proof {
-            // Pin balances_view(old(storage)) as `pre` so subsequent
-            // asserts have a single name to reason about.
             assert(from == balance_at(balances_view(old(storage)), *sender));
             assert(to   == balance_at(balances_view(old(storage)), *receiver));
         }
         match crate::core::transfer_balances(from, to, amount) {
             Ok((from_next, to_next)) => {
                 ax_balances_save(storage, sender, from_next);
-                // After the first save, the receiver's balance is
-                // unchanged (sender != receiver, and insert at sender
-                // doesn't touch other keys).
                 proof {
                     assert(balance_at(balances_view(storage), *receiver) == to);
                 }
                 ax_balances_save(storage, receiver, to_next);
+                proof {
+                    // Invoke the refinement lemma when its preconditions hold,
+                    // so the state-level ensures is satisfied.
+                    let pre = balances_view(old(storage));
+                    if pre.dom().contains(*sender)
+                       && pre.dom().contains(*receiver)
+                       && pre[*receiver] as int + amount as int <= u128::MAX as int
+                    {
+                        lemma_verified_transfer_matches_state(pre, *sender, *receiver, amount);
+                    }
+                }
                 Ok(())
             }
             Err(_msg) => {
@@ -125,27 +151,24 @@ vstd::prelude::verus! {
         )
     }
 
-    /// Verified instantiate step: sets `TOTAL_SUPPLY` to `total_supply`
-    /// and credits the owner with the full supply. The `ensures` captures
-    /// the storage delta — the view changes by exactly one balance insert
-    /// at `owner`, and the supply is set.
-    ///
-    /// Together with the assumption that the initial `balances_view` is
-    /// empty (which the cosmwasm runtime guarantees at deployment but we
-    /// don't formalise here), this establishes `sum(balances) ==
-    /// total_supply` post-instantiate — the conservation invariant.
+    /// Verified instantiate step: sets `TOTAL_SUPPLY`, credits the owner
+    /// with the full supply, and records `minter` as the authorized
+    /// minter. The `ensures` pins down the resulting storage delta.
     pub fn verified_instantiate<S: Storage>(
-        storage: &mut S,
-        owner:   &Addr,
+        storage:      &mut S,
+        owner:        &Addr,
+        minter:       &Addr,
         total_supply: u128,
     )
         ensures
             supply_view(final(storage)) == total_supply,
             balances_view(final(storage))
                 == balances_view(old(storage)).insert(*owner, total_supply),
+            minter_view(final(storage)) == Some(*minter),
     {
         ax_supply_save(storage, total_supply);
         ax_balances_save(storage, owner, total_supply);
+        ax_minter_save(storage, minter);
     }
 
     /// Verified balance lookup: returns the owner's balance per the abstract
@@ -308,34 +331,149 @@ vstd::prelude::verus! {
         assert(lhs =~= rhs);
     }
 
+    /// Refinement for `verified_mint`: the `u128`-level balance update
+    /// (insert at `to` with `balance + amount`) matches `core::
+    /// state_after_mint`'s balance field when viewed through
+    /// `nat_balances`, provided the arithmetic doesn't overflow.
+    pub proof fn lemma_verified_mint_matches_state(
+        balances_pre: SpecMap<Addr, u128>,
+        supply_pre:   u128,
+        to:           Addr,
+        amount:       u128,
+    )
+        requires
+            balances_pre.dom().contains(to),
+            balances_pre[to] as int + amount as int <= u128::MAX as int,
+            supply_pre as int + amount as int <= u128::MAX as int,
+        ensures
+            nat_balances(balances_pre.insert(to, (balances_pre[to] + amount) as u128))
+                == crate::core::state_after_mint(
+                    crate::core::State {
+                        total_supply: supply_pre as nat,
+                        balances:     nat_balances(balances_pre),
+                    },
+                    to, amount as nat,
+                ).balances,
+    {
+        let bp  = balances_pre;
+        let t   = bp[to];
+        let lhs = nat_balances(bp.insert(to, (t + amount) as u128));
+        let rhs = crate::core::state_after_mint(
+            crate::core::State {
+                total_supply: supply_pre as nat,
+                balances:     nat_balances(bp),
+            },
+            to, amount as nat,
+        ).balances;
+
+        assert(lhs.dom() =~= rhs.dom());
+
+        assert forall|k: Addr| #[trigger] lhs.dom().contains(k)
+            implies lhs[k] == rhs[k]
+        by {
+            if k == to {
+                // Both reduce to (t + amount) as nat.
+            } else {
+                assert(bp.dom().contains(k));
+            }
+        }
+        assert(lhs =~= rhs);
+    }
+
+    /// Refinement for `verified_burn`: same structure, with `-amount`.
+    pub proof fn lemma_verified_burn_matches_state(
+        balances_pre: SpecMap<Addr, u128>,
+        supply_pre:   u128,
+        from:         Addr,
+        amount:       u128,
+    )
+        requires
+            balances_pre.dom().contains(from),
+            balances_pre[from] >= amount,
+            supply_pre >= amount,
+        ensures
+            nat_balances(balances_pre.insert(from, (balances_pre[from] - amount) as u128))
+                == crate::core::state_after_burn(
+                    crate::core::State {
+                        total_supply: supply_pre as nat,
+                        balances:     nat_balances(balances_pre),
+                    },
+                    from, amount as nat,
+                ).balances,
+    {
+        let bp  = balances_pre;
+        let f   = bp[from];
+        let lhs = nat_balances(bp.insert(from, (f - amount) as u128));
+        let rhs = crate::core::state_after_burn(
+            crate::core::State {
+                total_supply: supply_pre as nat,
+                balances:     nat_balances(bp),
+            },
+            from, amount as nat,
+        ).balances;
+
+        assert(lhs.dom() =~= rhs.dom());
+
+        assert forall|k: Addr| #[trigger] lhs.dom().contains(k)
+            implies lhs[k] == rhs[k]
+        by {
+            if k == from {
+                // Both reduce to (f - amount) as nat.
+            } else {
+                assert(bp.dom().contains(k));
+            }
+        }
+        assert(lhs =~= rhs);
+    }
+
     // -- Mint & burn ----------------------------------------------------
 
     /// Verified `mint`: credits `amount` to `to` and increases
-    /// `total_supply` by the same amount. Fails on supply overflow.
-    /// No authorization check — wrapping callers should enforce that
-    /// (typically restricted to a Minter address in real cw20).
+    /// `total_supply`. Authorization: the caller must match the stored
+    /// minter (set at `verified_instantiate` time). On `Ok`, the storage
+    /// update matches `core::state_after_mint`; on `Err`, storage is
+    /// untouched.
     pub fn verified_mint<S: Storage>(
         storage: &mut S,
+        caller:  &Addr,
         to:      &Addr,
         amount:  u128,
     ) -> (r: Result<(), TransferError>)
         ensures
             match r {
                 Ok(()) =>
-                    supply_view(final(storage))
+                    minter_view(old(storage)) == Some(*caller)
+                    && supply_view(final(storage))
                         == (supply_view(old(storage)) + amount) as u128
                     && balances_view(final(storage))
                         == balances_view(old(storage)).insert(
                             *to,
                             (balance_at(balances_view(old(storage)), *to) + amount) as u128,
                         )
-                    && allowances_view(final(storage)) == allowances_view(old(storage)),
+                    && allowances_view(final(storage)) == allowances_view(old(storage))
+                    && minter_view(final(storage)) == minter_view(old(storage))
+                    // State-level connection (conditional).
+                    && (balances_view(old(storage)).dom().contains(*to)
+                        && balances_view(old(storage))[*to] as int + amount as int <= u128::MAX as int
+                        ==>
+                        nat_balances(balances_view(final(storage)))
+                            == crate::core::state_after_mint(
+                                crate::core::State {
+                                    total_supply: supply_view(old(storage)) as nat,
+                                    balances:     nat_balances(balances_view(old(storage))),
+                                },
+                                *to, amount as nat,
+                            ).balances),
                 Err(_) => true,
             },
     {
+        // Authorization: caller must be the registered minter.
+        match ax_minter_load(storage) {
+            Some(m) if m == *caller => {}
+            _ => return Err(TransferError::Unauthorized),
+        }
         let supply = ax_supply_load(storage);
         let bal    = ax_balances_load(storage, to);
-        // Both arithmetic operations must succeed.
         let new_supply = match supply.checked_add(amount) {
             Some(v) => v,
             None    => return Err(TransferError::Overflow),
@@ -346,6 +484,13 @@ vstd::prelude::verus! {
         };
         ax_supply_save(storage, new_supply);
         ax_balances_save(storage, to, new_bal);
+        proof {
+            let pre = balances_view(old(storage));
+            let pre_supply = supply_view(old(storage));
+            if pre.dom().contains(*to) && pre[*to] as int + amount as int <= u128::MAX as int {
+                lemma_verified_mint_matches_state(pre, pre_supply, *to, amount);
+            }
+        }
         Ok(())
     }
 
@@ -368,7 +513,21 @@ vstd::prelude::verus! {
                             *from,
                             (balance_at(balances_view(old(storage)), *from) - amount) as u128,
                         )
-                    && allowances_view(final(storage)) == allowances_view(old(storage)),
+                    && allowances_view(final(storage)) == allowances_view(old(storage))
+                    && minter_view(final(storage)) == minter_view(old(storage))
+                    // State-level connection (conditional).
+                    && (balances_view(old(storage)).dom().contains(*from)
+                        && balances_view(old(storage))[*from] >= amount
+                        && supply_view(old(storage)) >= amount
+                        ==>
+                        nat_balances(balances_view(final(storage)))
+                            == crate::core::state_after_burn(
+                                crate::core::State {
+                                    total_supply: supply_view(old(storage)) as nat,
+                                    balances:     nat_balances(balances_view(old(storage))),
+                                },
+                                *from, amount as nat,
+                            ).balances),
                 Err(_) => true,
             },
     {
@@ -384,6 +543,13 @@ vstd::prelude::verus! {
         };
         ax_supply_save(storage, new_supply);
         ax_balances_save(storage, from, new_bal);
+        proof {
+            let pre = balances_view(old(storage));
+            let pre_supply = supply_view(old(storage));
+            if pre.dom().contains(*from) && pre[*from] >= amount && pre_supply >= amount {
+                lemma_verified_burn_matches_state(pre, pre_supply, *from, amount);
+            }
+        }
         Ok(())
     }
 
@@ -420,6 +586,32 @@ vstd::prelude::verus! {
         }
     }
 
+    /// Verified `update_minter`: change the registered minter. The caller
+    /// must be the current minter. On `Ok`, only `minter_view` changes.
+    pub fn verified_update_minter<S: Storage>(
+        storage:    &mut S,
+        caller:     &Addr,
+        new_minter: &Addr,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    minter_view(old(storage)) == Some(*caller)
+                    && minter_view(final(storage))     == Some(*new_minter)
+                    && balances_view(final(storage))   == balances_view(old(storage))
+                    && supply_view(final(storage))     == supply_view(old(storage))
+                    && allowances_view(final(storage)) == allowances_view(old(storage)),
+                Err(_) => true,
+            },
+    {
+        match ax_minter_load(storage) {
+            Some(m) if m == *caller => {}
+            _ => return Err(TransferError::Unauthorized),
+        }
+        ax_minter_save(storage, new_minter);
+        Ok(())
+    }
+
     /// Atomic decrease of `(owner, spender)` allowance by `amount`,
     /// saturating at 0 (cw20 convention). Always succeeds.
     pub fn verified_decrease_allowance<S: Storage>(
@@ -450,6 +642,9 @@ vstd::prelude::verus! {
 #[cw_serde]
 pub struct InstantiateMsg {
     pub total_supply: Uint128,
+    /// Optional minter address. If absent, defaults to the instantiator,
+    /// matching cw20's convention.
+    pub minter: Option<String>,
 }
 
 #[cw_serde]
@@ -461,6 +656,7 @@ pub enum ExecuteMsg {
     Burn              { amount: Uint128 },
     IncreaseAllowance { spender:   String, amount: Uint128 },
     DecreaseAllowance { spender:   String, amount: Uint128 },
+    UpdateMinter      { new_minter: String },
 }
 
 #[cw_serde]
@@ -478,6 +674,7 @@ pub enum ContractError {
     #[error("overflow")]                  Overflow,
     #[error("self-transfer")]             SelfTransfer,
     #[error("insufficient allowance")]    InsufficientAllowance,
+    #[error("unauthorized")]              Unauthorized,
 }
 
 /// Concrete wrapper around `&mut dyn Storage` so we can call the
@@ -508,9 +705,16 @@ impl Storage for StoreRefRead<'_> {
 
 #[entry_point]
 pub fn instantiate(deps: DepsMut, _env: Env, info: MessageInfo, msg: InstantiateMsg) -> Result<Response, ContractError> {
+    // Default minter = instantiator (matches cw20 convention).
+    let minter = match msg.minter {
+        Some(s) => deps.api.addr_validate(&s)?,
+        None    => info.sender.clone(),
+    };
     let mut store_ref = StoreRef(deps.storage);
-    verified_instantiate(&mut store_ref, &info.sender, msg.total_supply.u128());
-    Ok(Response::new().add_attribute("action", "instantiate"))
+    verified_instantiate(&mut store_ref, &info.sender, &minter, msg.total_supply.u128());
+    Ok(Response::new()
+        .add_attribute("action", "instantiate")
+        .add_attribute("minter", minter))
 }
 
 fn map_transfer_error(e: TransferError) -> ContractError {
@@ -519,6 +723,7 @@ fn map_transfer_error(e: TransferError) -> ContractError {
         TransferError::Insufficient          => ContractError::Insufficient,
         TransferError::Overflow              => ContractError::Overflow,
         TransferError::InsufficientAllowance => ContractError::InsufficientAllowance,
+        TransferError::Unauthorized          => ContractError::Unauthorized,
     }
 }
 
@@ -558,14 +763,12 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> 
                 .add_attribute("amount", amount.to_string()))
         }
         ExecuteMsg::Mint { recipient, amount } => {
-            // NOTE: a real cw20 would gate this with a Minter-address
-            // check. Omitted here to keep the focus on the verified
-            // arithmetic + invariant story.
             let to = deps.api.addr_validate(&recipient)?;
-            verified_mint(&mut store_ref, &to, amount.u128())
+            verified_mint(&mut store_ref, &info.sender, &to, amount.u128())
                 .map_err(map_transfer_error)?;
             Ok(Response::new()
                 .add_attribute("action", "mint")
+                .add_attribute("by", info.sender)
                 .add_attribute("to", to)
                 .add_attribute("amount", amount.to_string()))
         }
@@ -595,6 +798,15 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> 
                 .add_attribute("owner", info.sender)
                 .add_attribute("spender", spender_addr)
                 .add_attribute("amount", amount.to_string()))
+        }
+        ExecuteMsg::UpdateMinter { new_minter } => {
+            let new_minter_addr = deps.api.addr_validate(&new_minter)?;
+            verified_update_minter(&mut store_ref, &info.sender, &new_minter_addr)
+                .map_err(map_transfer_error)?;
+            Ok(Response::new()
+                .add_attribute("action", "update_minter")
+                .add_attribute("by", info.sender)
+                .add_attribute("new_minter", new_minter_addr))
         }
     }
 }
@@ -638,7 +850,7 @@ mod tests {
         let mut deps = mock_dependencies();
         let a = actors(&deps.api);
         let info = message_info(&a.owner, &[]);
-        let msg = InstantiateMsg { total_supply: Uint128::new(supply) };
+        let msg = InstantiateMsg { total_supply: Uint128::new(supply), minter: None };
         instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
         (deps, a)
     }
@@ -893,5 +1105,70 @@ mod tests {
     fn transfer_from_via_approval(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, a: &Actors) {
         approve(deps, &a.alice, &a.bob, 100);
         transfer_from(deps, &a.bob, &a.alice, &a.owner, 50).unwrap();
+    }
+
+    // ---- minter authorization ----
+
+    #[test]
+    fn mint_by_non_minter_unauthorized() {
+        // Default minter is the instantiator (owner). alice tries to mint.
+        let (mut deps, a) = setup(1_000);
+        let err = mint(&mut deps, &a.alice, &a.bob, 100).unwrap_err();
+        assert!(matches!(err, ContractError::Unauthorized));
+        // State unchanged.
+        assert_eq!(total_supply(deps.as_ref()), 1_000);
+        assert_eq!(balance(deps.as_ref(), &a.bob), 0);
+    }
+
+    #[test]
+    fn mint_by_minter_works() {
+        let (mut deps, a) = setup(1_000);
+        // Owner is the default minter.
+        mint(&mut deps, &a.owner, &a.bob, 250).unwrap();
+        assert_eq!(total_supply(deps.as_ref()), 1_250);
+        assert_eq!(balance(deps.as_ref(), &a.bob), 250);
+    }
+
+    fn update_minter(deps: &mut OwnedDeps<MockStorage, MockApi, MockQuerier>, caller: &Addr, new_minter: &Addr) -> Result<(), ContractError> {
+        let info = message_info(caller, &[]);
+        let msg = ExecuteMsg::UpdateMinter { new_minter: new_minter.to_string() };
+        execute(deps.as_mut(), mock_env(), info, msg).map(|_| ())
+    }
+
+    #[test]
+    fn update_minter_by_current_minter() {
+        let (mut deps, a) = setup(1_000);
+        // Owner is default minter. Transfer to alice.
+        update_minter(&mut deps, &a.owner, &a.alice).unwrap();
+        // Owner can no longer mint; alice can.
+        assert!(matches!(mint(&mut deps, &a.owner, &a.bob, 50).unwrap_err(), ContractError::Unauthorized));
+        mint(&mut deps, &a.alice, &a.bob, 50).unwrap();
+        assert_eq!(balance(deps.as_ref(), &a.bob), 50);
+    }
+
+    #[test]
+    fn update_minter_by_non_minter_rejected() {
+        let (mut deps, a) = setup(1_000);
+        let err = update_minter(&mut deps, &a.alice, &a.bob).unwrap_err();
+        assert!(matches!(err, ContractError::Unauthorized));
+    }
+
+    #[test]
+    fn explicit_minter_in_instantiate() {
+        // Set alice as the minter instead of the instantiator (owner).
+        let mut deps = mock_dependencies();
+        let a = actors(&deps.api);
+        let info = message_info(&a.owner, &[]);
+        let msg = InstantiateMsg {
+            total_supply: Uint128::new(1_000),
+            minter: Some(a.alice.to_string()),
+        };
+        instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+        // Owner can't mint now.
+        let err = mint(&mut deps, &a.owner, &a.bob, 100).unwrap_err();
+        assert!(matches!(err, ContractError::Unauthorized));
+        // Alice can.
+        mint(&mut deps, &a.alice, &a.bob, 100).unwrap();
+        assert_eq!(balance(deps.as_ref(), &a.bob), 100);
     }
 }
