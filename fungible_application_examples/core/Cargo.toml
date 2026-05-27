@@ -1,0 +1,20 @@
+[package]
+name = "verus_fungible_core"
+version = "0.1.0"
+edition = "2021"
+description = "Chain-agnostic verified fungible-token core. Shared by each per-chain crate so the State<A>, conservation lemmas, and generic storage spec helpers exist in exactly one place."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# alloc-only to keep this crate consumable from no_std chains (Gear).
+# Chains that need std-enabled vstd (cosmwasm, near, ic, ink!, solana, ...)
+# enable it via their own Cargo dep on vstd; Cargo unifies the feature set.
+vstd = { version = "=0.0.0-2026-05-17-0151", default-features = false, features = ["alloc"] }
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }

@@ -25,6 +25,11 @@ use crate::cw_axioms::{
 // The `ensures` clause pins down the storage effect on the abstract
 // `balances_view` of `Storage`, using the axioms in `cw_axioms.rs`.
 
+// TransferError, balance_at, transfer_balances_map, nat_balances, and the
+// state-refinement lemmas (lemma_balance_map_{transfer,mint,burn}_matches_state)
+// all live in `verus_fungible_core` and are re-used here unchanged.
+pub use verus_fungible_core::TransferError;
+
 vstd::prelude::verus! {
     #[cfg(verus_only)]
     use vstd::prelude::*;
@@ -32,34 +37,13 @@ vstd::prelude::verus! {
     use vstd::map::Map as SpecMap;
     #[cfg(verus_only)]
     use crate::cw_axioms::{balances_view, supply_view, allowances_view, minter_view};
-
-    /// Failure modes of `verified_transfer` / `verified_transfer_from`.
-    /// Mirrors the runtime `ContractError` but is closed (no `Std`
-    /// variant) so it can be returned from verified code.
-    #[derive(PartialEq, Eq)]
-    pub enum TransferError {
-        SelfTransfer,
-        Insufficient,
-        Overflow,
-        InsufficientAllowance,
-        Unauthorized,
-    }
-
-    /// Balance of `k` in the abstract map, with absent entries treated as 0.
-    pub open spec fn balance_at(m: SpecMap<Addr, u128>, k: Addr) -> u128 {
-        if m.dom().contains(k) { m[k] } else { 0u128 }
-    }
-
-    /// The map after `state_after_transfer`'s balance update.
-    pub open spec fn transfer_balances_map(
-        m: SpecMap<Addr, u128>,
-        sender: Addr,
-        receiver: Addr,
-        amount: u128,
-    ) -> SpecMap<Addr, u128> {
-        m.insert(sender,   (balance_at(m, sender) - amount) as u128)
-         .insert(receiver, (balance_at(m, receiver) + amount) as u128)
-    }
+    #[cfg(verus_only)]
+    use verus_fungible_core::{
+        balance_at, transfer_balances_map, nat_balances,
+        lemma_balance_map_transfer_matches_state,
+        lemma_balance_map_mint_matches_state,
+        lemma_balance_map_burn_matches_state,
+    };
 
     /// Verified transfer step: ensures the storage update matches
     /// `transfer_balances_map` on success, leaves storage untouched on
@@ -124,7 +108,7 @@ vstd::prelude::verus! {
                        && pre.dom().contains(*receiver)
                        && pre[*receiver] as int + amount as int <= u128::MAX as int
                     {
-                        lemma_verified_transfer_matches_state(pre, *sender, *receiver, amount);
+                        lemma_balance_map_transfer_matches_state(pre, *sender, *receiver, amount);
                     }
                 }
                 Ok(())
@@ -134,21 +118,6 @@ vstd::prelude::verus! {
                 else             { Err(TransferError::Overflow) }
             }
         }
-    }
-
-    // ---- Connection to `core::State` ----------------------------------
-    //
-    // `verified_transfer` operates on `u128` storage. `core::State<A>`
-    // and `core::state_after_transfer` operate on `nat` (for unbounded
-    // arithmetic in proofs). The bridge is `nat_balances`, lifting
-    // `u128`-valued maps to `nat`-valued maps point-wise.
-
-    /// Lift a `u128`-valued balance map into the `nat`-valued spec map.
-    pub open spec fn nat_balances(m: SpecMap<Addr, u128>) -> SpecMap<Addr, nat> {
-        SpecMap::new(
-            |a: Addr| m.dom().contains(a),
-            |a: Addr| m[a] as nat,
-        )
     }
 
     /// Verified instantiate step: sets `TOTAL_SUPPLY`, credits the owner
@@ -274,158 +243,6 @@ vstd::prelude::verus! {
         }
     }
 
-    /// Refinement: the `u128`-level transfer (`transfer_balances_map`)
-    /// matches the `nat`-level transfer (`core::state_after_transfer`'s
-    /// `.balances`) when viewed through `nat_balances`, provided the
-    /// arithmetic doesn't under/overflow.
-    pub proof fn lemma_verified_transfer_matches_state(
-        balances_pre: SpecMap<Addr, u128>,
-        sender:       Addr,
-        receiver:     Addr,
-        amount:       u128,
-    )
-        requires
-            sender != receiver,
-            balances_pre.dom().contains(sender),
-            balances_pre.dom().contains(receiver),
-            balances_pre[sender] >= amount,
-            balances_pre[receiver] as int + amount as int <= u128::MAX as int,
-        ensures
-            nat_balances(transfer_balances_map(balances_pre, sender, receiver, amount))
-                == crate::core::state_after_transfer(
-                    crate::core::State {
-                        total_supply: 0nat,
-                        balances:     nat_balances(balances_pre),
-                    },
-                    sender, receiver, amount as nat,
-                ).balances,
-    {
-        let bp  = balances_pre;
-        let f   = bp[sender];
-        let t   = bp[receiver];
-        let lhs = nat_balances(
-            bp.insert(sender,   (f - amount) as u128)
-              .insert(receiver, (t + amount) as u128)
-        );
-        let rhs = crate::core::state_after_transfer(
-            crate::core::State {
-                total_supply: 0nat,
-                balances:     nat_balances(bp),
-            },
-            sender, receiver, amount as nat,
-        ).balances;
-
-        assert(lhs.dom() =~= rhs.dom());
-
-        assert forall|k: Addr| #[trigger] lhs.dom().contains(k)
-            implies lhs[k] == rhs[k]
-        by {
-            if k == sender {
-                // (f - amount) as u128 as nat == (f as nat - amount as nat) as nat
-            } else if k == receiver {
-                // (t + amount) as u128 as nat == (t as nat + amount as nat) as nat
-            } else {
-                assert(bp.dom().contains(k));
-            }
-        }
-        assert(lhs =~= rhs);
-    }
-
-    /// Refinement for `verified_mint`: the `u128`-level balance update
-    /// (insert at `to` with `balance + amount`) matches `core::
-    /// state_after_mint`'s balance field when viewed through
-    /// `nat_balances`, provided the arithmetic doesn't overflow.
-    pub proof fn lemma_verified_mint_matches_state(
-        balances_pre: SpecMap<Addr, u128>,
-        supply_pre:   u128,
-        to:           Addr,
-        amount:       u128,
-    )
-        requires
-            balances_pre.dom().contains(to),
-            balances_pre[to] as int + amount as int <= u128::MAX as int,
-            supply_pre as int + amount as int <= u128::MAX as int,
-        ensures
-            nat_balances(balances_pre.insert(to, (balances_pre[to] + amount) as u128))
-                == crate::core::state_after_mint(
-                    crate::core::State {
-                        total_supply: supply_pre as nat,
-                        balances:     nat_balances(balances_pre),
-                    },
-                    to, amount as nat,
-                ).balances,
-    {
-        let bp  = balances_pre;
-        let t   = bp[to];
-        let lhs = nat_balances(bp.insert(to, (t + amount) as u128));
-        let rhs = crate::core::state_after_mint(
-            crate::core::State {
-                total_supply: supply_pre as nat,
-                balances:     nat_balances(bp),
-            },
-            to, amount as nat,
-        ).balances;
-
-        assert(lhs.dom() =~= rhs.dom());
-
-        assert forall|k: Addr| #[trigger] lhs.dom().contains(k)
-            implies lhs[k] == rhs[k]
-        by {
-            if k == to {
-                // Both reduce to (t + amount) as nat.
-            } else {
-                assert(bp.dom().contains(k));
-            }
-        }
-        assert(lhs =~= rhs);
-    }
-
-    /// Refinement for `verified_burn`: same structure, with `-amount`.
-    pub proof fn lemma_verified_burn_matches_state(
-        balances_pre: SpecMap<Addr, u128>,
-        supply_pre:   u128,
-        from:         Addr,
-        amount:       u128,
-    )
-        requires
-            balances_pre.dom().contains(from),
-            balances_pre[from] >= amount,
-            supply_pre >= amount,
-        ensures
-            nat_balances(balances_pre.insert(from, (balances_pre[from] - amount) as u128))
-                == crate::core::state_after_burn(
-                    crate::core::State {
-                        total_supply: supply_pre as nat,
-                        balances:     nat_balances(balances_pre),
-                    },
-                    from, amount as nat,
-                ).balances,
-    {
-        let bp  = balances_pre;
-        let f   = bp[from];
-        let lhs = nat_balances(bp.insert(from, (f - amount) as u128));
-        let rhs = crate::core::state_after_burn(
-            crate::core::State {
-                total_supply: supply_pre as nat,
-                balances:     nat_balances(bp),
-            },
-            from, amount as nat,
-        ).balances;
-
-        assert(lhs.dom() =~= rhs.dom());
-
-        assert forall|k: Addr| #[trigger] lhs.dom().contains(k)
-            implies lhs[k] == rhs[k]
-        by {
-            if k == from {
-                // Both reduce to (f - amount) as nat.
-            } else {
-                assert(bp.dom().contains(k));
-            }
-        }
-        assert(lhs =~= rhs);
-    }
-
     // -- Mint & burn ----------------------------------------------------
 
     /// Verified `mint`: credits `amount` to `to` and increases
@@ -488,7 +305,7 @@ vstd::prelude::verus! {
             let pre = balances_view(old(storage));
             let pre_supply = supply_view(old(storage));
             if pre.dom().contains(*to) && pre[*to] as int + amount as int <= u128::MAX as int {
-                lemma_verified_mint_matches_state(pre, pre_supply, *to, amount);
+                lemma_balance_map_mint_matches_state(pre, pre_supply, *to, amount);
             }
         }
         Ok(())
@@ -547,7 +364,7 @@ vstd::prelude::verus! {
             let pre = balances_view(old(storage));
             let pre_supply = supply_view(old(storage));
             if pre.dom().contains(*from) && pre[*from] >= amount && pre_supply >= amount {
-                lemma_verified_burn_matches_state(pre, pre_supply, *from, amount);
+                lemma_balance_map_burn_matches_state(pre, pre_supply, *from, amount);
             }
         }
         Ok(())
