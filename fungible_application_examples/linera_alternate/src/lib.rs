@@ -14,9 +14,14 @@ pub mod core;
 pub mod verified_helpers;
 
 // Axiomatization of linera SDK types we depend on (Amount, AccountOwner,
-// OwnerSpender). SyncMapView axiomatization is still deferred — see
-// TODO.md / linera_axioms.rs.
+// OwnerSpender, SyncMapView).
 pub mod linera_axioms;
+
+// Verified state-method kernels. The macros on `FungibleTokenState` make
+// it inconvenient to put method bodies directly inside `verus!{}`, so
+// the substantive logic lives here and state.rs's methods are thin
+// forwarders (the same pattern as NEAR's `Fungible::transfer`).
+pub mod verified_state;
 
 pub use linera_sdk::abis::fungible::*;
 use linera_sdk::linera_base_types::{Account, AccountOwner, Amount};

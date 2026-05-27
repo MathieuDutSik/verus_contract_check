@@ -176,6 +176,42 @@ Different chains forced different wrapping strategies:
 | CosmWasm | `dyn Storage` + `Map<K, V>` const | `StoreRef<'_>` + `StoreRefRead<'_>` newtype, axiomatized point ops |
 | IC | `BTreeMap<K, V>` (std) | thin `read_balance`/`save_balance` wrappers (no newtype) |
 | Gear | `hashbrown::HashMap<K, V>` | `AxHashMap<K, V>` newtype |
+| MultiversX | `BigUint<M>` (managed type, `M: ManagedTypeApi`) | trait-cascade pattern (see below) + specialized point ops |
+| linera_alternate | `SyncMapView<C, K, V>` (3-param, `C: SyncContext`) | trait-cascade pattern + concrete-`C` specialization + point ops |
+
+### The trait-cascade pattern (`MultiversX` / `linera_alternate`)
+
+External traits with multiple super-traits can be axiomatized via
+`external_trait_specification` by listing the **external** super-traits
+directly in the proxy's super-trait header:
+
+```rust
+#[verifier::external_trait_specification]
+pub trait ExManagedTypeApi: HandleTypeInfo + StaticVarApi + ErrorApi + Clone + 'static {
+    type ExternalTraitSpecificationFor: ManagedTypeApi;
+}
+```
+
+What did *not* work (we tried):
+
+- `type ExternalTraitSpecificationFor: ManagedTypeApi + HandleTypeInfo + ...;` — "only one bound allowed in ExternalTraitSpecificationFor"
+- `where Self::ExternalTraitSpecificationFor: HandleTypeInfo, ...` on the associated type — "bounds don't match"
+- `where <Self as ExManagedTypeApi>::ExternalTraitSpecificationFor: ...` on the trait — "only one bound allowed"
+- `pub trait ExManagedTypeApi: ExHandleTypeInfo + ExStaticVarApi + ExErrorApi { ... }` — Verus sees the inherited bounds but doesn't equate proxy names with their external counterparts
+
+The working form puts the *external* trait names in the proxy's
+super-trait list. Verus folds those into bounds on
+`Self::ExternalTraitSpecificationFor` and matches them against the
+super-trait closure of the proxied trait. The associated type still
+declares exactly one bound (the trait being proxied).
+
+This pattern generalizes — same fix unblocked both MultiversX's
+`BigUint<M>` and linera_alternate's `SyncMapView<C, K, V>`.
+
+NB: this does *not* help NEAR's `Sealed` blocker (the super-trait's
+path is private and can't be referenced) or Gear's `hashbrown::HashMap`
+blocker (those are unknown *type parameters*, not super-traits). The
+newtype-wrapper escape hatch still applies to those.
 
 ### Why NEAR needs a wrapper (`AxLookupMap`)
 

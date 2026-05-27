@@ -58,10 +58,11 @@ inaccessible. We sidestepped by:
   - wrapping `LookupMap<K, V, Identity>` in our own `AxLookupMap<K, V>`,
   - specialising the wrapper to the default `Identity` hasher.
 
-To support alternate hashers (`Sha256`, `Keccak256`) would need either:
-  - a Verus extension allowing private super-traits in
-    `external_trait_specification`, or
-  - a separate wrapper per hasher.
+NB: the trait-cascade pattern (DESIGN.md) does **not** help here.
+That pattern works when the super-traits are *visible* and the proxy
+can name them. `Sealed` is `pub(crate)` private in `near-sdk`, so no
+proxy can reference it. Genuinely blocked on either a Verus extension
+allowing private super-traits, or a per-hasher wrapper.
 
 ### Q-generic borrow specialisation in NEAR LookupMap axioms
 
@@ -131,8 +132,9 @@ Both are deferred; the line itself is dispatch, no logic.
 | arithmetic + State conservation | ✅ verified |
 | storage wrapper (`AxHashMap`) | ✅ verified |
 | caller resolution via axiomatized `msg::source()` | ✅ verified |
-| `verified_transfer` | ✅ verified |
-| `extern "C" fn handle()` dispatch | unverified (touches `static mut`, `msg::*`) |
+| `apply_transfer` + `verified_transfer` | ✅ verified |
+| `extern "C" fn handle()` dispatch | ✅ routed through `verified_transfer` (deployed path is the verified path) |
+| `do_transfer` (test-only) | ✅ routes through the same verified `apply_transfer` kernel |
 | cw20 surface | not implemented |
 
 ### ink!
@@ -165,31 +167,34 @@ for `Storable` / `StorageKey`, port the storage axioms over.
 
 | component | status |
 |---|---|
-| arithmetic + State conservation | ✅ verified |
-| contract logic (uses `BigUint`/`ManagedAddress`/`SingleValueMapper`) | **unverified** — see BigUint gap below |
+| arithmetic + State conservation (chain-agnostic core) | ✅ verified |
+| BigUint axiomatization (ghost `biguint_val -> nat`, ops, comparisons) | ✅ verified |
+| `verified_transfer_big` (conservation on BigUint, no overflow precondition) | ✅ verified |
+| `Fungible::transfer` endpoint | ✅ routed through `verified_transfer_big` |
+| `SingleValueMapper<V>::get` / `set` (storage layer) | not axiomatized |
 | caller resolution via `self.blockchain().get_caller()` | not axiomatized |
+| mint/burn/approve/transfer_from cw20-style | not implemented |
 
-#### BigUint vs `u128` impedance on MultiversX
+#### BigUint axiomatization (resolved)
 
-`multiversx_sc::types::BigUint` is **unbounded** (heap-allocated
-arbitrary-precision integer). Our verified `core::transfer_balances`
-takes `u128`. So:
+`BigUint<M: ManagedTypeApi>` is now axiomatized in `mvx_axioms.rs` via
+the trait-cascade pattern (see DESIGN.md). The key insight:
+`BigUint` maps to spec-level `nat` 1-to-1 because it is unbounded by
+construction — there is **no overflow precondition** on addition, unlike
+the `u128`-based `core::transfer_balances`. The verified kernel
+`verified_transfer_big` proves conservation directly:
 
-- A naive bridge "convert `BigUint` to `u128`" can silently lose data
-  for amounts beyond `u128::MAX`. Not acceptable for a token contract.
-- The honest fix is to either: (a) axiomatize `BigUint` arithmetic as
-  spec-level unbounded `int`/`nat` operations; or (b) duplicate
-  `core::transfer_balances` to operate on `BigUint` rather than `u128`.
+```
+biguint_val(&from_next) + biguint_val(&to_next)
+    == biguint_val(&from_balance) + biguint_val(&to_balance)
+```
 
-Effort to fill: substantial. `BigUint` has a large surface
-(`+`/`-`/`*`/`/`, comparisons, conversions, encoding) and lives behind
-the framework's "managed types" indirection. We'd need
-`external_trait_specification` for managed buffers, plus a Verus-aware
-arithmetic model that matches the runtime's behaviour.
-
-In the meantime: MultiversX's chain-agnostic `core.rs` does verify
-(7 obligations), and the lemmas about `State<A>` are available — they
-just aren't connected to the actual contract's BigUint arithmetic.
+The `Fungible::transfer` endpoint calls this kernel, so the deployed
+arithmetic is the verified arithmetic. The unverified surface that
+remains is the two `SingleValueMapper::get()` reads and two `set()`
+writes that bracket the kernel call. Axiomatizing
+`SingleValueMapper<V>` would close that gap (the parallel of
+linera_alternate's `SyncMapView` work).
 
 #### Dependency-version surprise (proc-macro2 conflict)
 
@@ -222,36 +227,31 @@ Two variants live side-by-side:
   sync SDK variant
   (`MathieuDutSik/linera-protocol_second` branch
   `alternate_sync_keyvaluestore`, exposing `SyncMapView` /
-  `SyncViewStorageContext` / `SyncRootView`). **Shallow port: 15
-  verified, 0 errors.**
+  `SyncViewStorageContext` / `SyncRootView`). **8 verified locally + 12
+  in shared core, 0 errors.**
 
 | component | status |
 |---|---|
-| chain-agnostic `core::State<A>` (transfer + mint + burn + conservation lemmas) | ✅ 9 obligations |
-| `verified_helpers.rs` (allowance/transfer_from u128 kernels matching `state.rs`) | ✅ 6 obligations |
-| `Amount` external type spec | not done |
-| `SyncMapView<K,V>` external type spec + read/write axioms | not done |
-| State-layer integration (lifting kernel proofs to `FungibleTokenState::credit`, `debit`, `approve`, `debit_for_transfer_from`) | not done |
+| chain-agnostic `core::State<A>` (in shared crate) | ✅ verified |
+| `verified_helpers.rs` (allowance/transfer_from u128 kernels) | ✅ verified |
+| `Amount` external_type_specification + `amount_val` ghost + arithmetic axioms | ✅ axiomatized (linera_axioms.rs) |
+| `AccountOwner` / `OwnerSpender` external_type_specifications | ✅ axiomatized |
+| `SyncMapView<C, K, V>` external_type_specification + ghost projection + point-op wrappers | ✅ axiomatized (specialized to concrete `SyncViewStorageContext`, skip `Borrow<Q>` generality) |
+| `verified_credit` / `verified_debit` kernels | ✅ verified |
+| `state.rs::credit` / `state.rs::debit` (forwarders to verified kernels) | ✅ deployed-fn = verified-fn |
+| `verified_approve` / `verified_debit_for_transfer_from` | deferred — `OwnerSpender::new` panics on owner==spender; needs `panic_str` axiom or `requires owner != spender` precondition |
+| State-level connection lemma (`account_map_view` → `core::state_after_*`) | not done — mechanical port from CosmWasm's `lemma_balance_map_transfer_matches_state` |
 | Cross-microchain `Message::Credit` / `Message::Withdraw` semantics | not done — sub-message blocker |
 
-What today's 15 obligations buy us:
-- The arithmetic kernels that `state.rs` reduces to (after stripping
-  `Amount` and `SyncMapView`) are proven: no underflow on debit, no
-  overflow on credit, allowance correctly decremented in `transfer_from`,
-  and (from `core.rs`) `from + to` is conserved across a transfer.
-- Same "shallow port" tier as ink!/MultiversX. Linera_alternate is the
-  best-positioned chain for *deeper* verification because the sync API
-  removes the async-storage blocker entirely.
-
-Path to lifting to the full state-layer:
-1. Add `external_type_specification` wrappers for `Amount` (u128
-   newtype) and `OwnerSpender`.
-2. Axiomatize `SyncMapView<K,V>` via a ghost-view function projecting
-   it to `vstd::map::Map<K,V>`, plus `assume_specification` on
-   `get`/`insert`/`remove`/`get_mut_or_default`.
-3. Re-state `state.rs` methods with `ensures` that connect to the
-   `core::State<A>` invariants — should be mechanical once (1)+(2)
-   land.
+Path to closing the remaining gap:
+1. Add a `panic_str(msg: &str)` axiom with `ensures false` (NEAR/IC have
+   one we can copy).
+2. Write `verified_approve` and `verified_debit_for_transfer_from`,
+   both routing through the panic-on-`owner==spender` path that
+   `OwnerSpender::new` requires.
+3. Add the state-level connection by invoking the shared crate's
+   `lemma_balance_map_transfer_matches_state` from inside the verified
+   kernels — same shape as CosmWasm's `verified_transfer`.
 
 ### Solana
 

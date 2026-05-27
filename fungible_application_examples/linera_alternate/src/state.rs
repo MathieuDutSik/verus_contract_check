@@ -87,35 +87,22 @@ impl FungibleTokenState {
         }
     }
 
-    /// Credits an `account` with the provided `amount`.
+    /// Credits an `account` with the provided `amount`. Forwards to the
+    /// verified `crate::verified_state::verified_credit` kernel; the
+    /// kernel's `ensures` clause pins the abstract effect on the
+    /// `account_map_view` ghost projection.
     pub fn credit(&mut self, account: AccountOwner, amount: Amount) {
-        if amount == Amount::ZERO {
-            return;
-        }
-        let mut balance = self.balance_or_default(&account);
-        balance.saturating_add_assign(amount);
-        self.accounts
-            .insert(&account, balance)
-            .expect("Failed insert statement");
+        crate::verified_state::verified_credit(&mut self.accounts, account, amount);
     }
 
-    /// Tries to debit the requested `amount` from an `account`.
+    /// Tries to debit the requested `amount` from an `account`. Forwards
+    /// to `verified_state::verified_debit`; on underflow (insufficient
+    /// balance) the kernel returns `Err(())` and we panic — matching the
+    /// previous direct-arithmetic behavior.
     pub fn debit(&mut self, account: AccountOwner, amount: Amount) {
-        if amount == Amount::ZERO {
-            return;
-        }
-        let mut balance = self.balance_or_default(&account);
-        balance.try_sub_assign(amount).unwrap_or_else(|_| {
-            panic!("Source account {account} does not have sufficient balance for transfer")
-        });
-        if balance == Amount::ZERO {
-            self.accounts
-                .remove(&account)
-                .expect("Failed to remove an empty account");
-        } else {
-            self.accounts
-                .insert(&account, balance)
-                .expect("Failed insertion operation");
-        }
+        crate::verified_state::verified_debit(&mut self.accounts, account, amount)
+            .unwrap_or_else(|()| {
+                panic!("Source account {account} does not have sufficient balance for transfer")
+            });
     }
 }

@@ -11,17 +11,27 @@
 //     u128::from(Amount)              (the inner value)
 //     AccountOwner / OwnerSpender external_type_specifications (opaque)
 //     OwnerSpender::new(owner, spender) (constructor: stores both fields)
-//
-//   NOT axiomatized (deferred):
-//     SyncMapView<C, I, V> + its get/insert/remove/get_mut_or_default
-//     (each is a substantial axiomatization piece: ~80 LOC + a ghost
-//     SpecMap projection. Tracked in TODO.md.)
+//     SyncContext external_trait_specification (super-trait: Clone, via the
+//       proxy-trait-with-external-supertraits pattern that the multiversx
+//       BigUint axiomatization established)
+//     SyncMapView external_type_specification (specialized to the concrete
+//       SyncViewStorageContext from linera_sdk's type alias)
+//     account_map_view / allowance_map_view  ghost projections
+//     ax_account_get / ax_account_insert / ax_account_remove  point-op
+//       wrappers specialized to (AccountOwner, Amount). Skips Borrow<Q>
+//       generality — the contract only uses Q = I.
 //
 // TRUST: every line below this banner enlarges the TCB. We trust the
 // linera SDK to implement these operations as the axioms claim.
 
 use vstd::prelude::*;
 use linera_sdk::linera_base_types::{Amount, AccountOwner, OwnerSpender};
+use linera_sdk::views::{linera_views, SyncMapView};
+use linera_sdk::KeyValueStore;
+use linera_views::sync_views::context::SyncViewContext;
+use linera_views::sync_views::map_view::SyncMapView as SyncMapViewBase;
+#[cfg(verus_only)]
+use vstd::map::Map as SpecMap;
 
 verus! {
 
@@ -128,6 +138,107 @@ pub fn owner_spender_new(owner: AccountOwner, spender: AccountOwner) -> (r: Owne
     ensures owner_spender_pair(r) == (owner, spender),
 {
     OwnerSpender::new(owner, spender)
+}
+
+// -- SyncViewContext + SyncMapView (the underlying generic types) ------
+//
+// `linera_sdk::views::SyncMapView<K, V>` is a 2-param alias for
+// `linera_views::SyncMapView<SyncViewStorageContext, K, V>`, and
+// `SyncViewStorageContext` is itself an alias for `SyncViewContext<(), KeyValueStore>`.
+// Verus's external_type_specification operates on the *underlying* struct
+// definitions, so we declare proxies with matching generic signatures.
+//
+// We don't axiomatize `SyncContext` as a trait — our wrapper functions
+// below are specialized to the SDK's 2-param alias, so the M parameter
+// (and its SyncContext bound) never appears in any verified signature.
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+pub struct ExKeyValueStore(#[allow(dead_code)] KeyValueStore);
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+#[verifier::accept_recursive_types(E)]
+#[verifier::accept_recursive_types(S)]
+pub struct ExSyncViewContext<E, S>(#[allow(dead_code)] SyncViewContext<E, S>);
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+#[verifier::accept_recursive_types(C)]
+#[verifier::accept_recursive_types(K)]
+#[verifier::accept_recursive_types(V)]
+pub struct ExSyncMapView<C, K, V>(#[allow(dead_code)] SyncMapViewBase<C, K, V>);
+
+/// Ghost projection of the `accounts` map into a SpecMap.
+pub uninterp spec fn account_map_view(m: &SyncMapView<AccountOwner, Amount>) -> SpecMap<AccountOwner, Amount>;
+
+/// Ghost projection of the `allowances` map into a SpecMap.
+pub uninterp spec fn allowance_map_view(m: &SyncMapView<OwnerSpender, Amount>) -> SpecMap<OwnerSpender, Amount>;
+
+// -- Account-map point-op wrappers -------------------------------------
+//
+// Specialized to (K = AccountOwner, V = Amount). Skip Borrow<Q> generality:
+// the contract only ever looks up by `&AccountOwner`, never by a borrowed
+// shorter form. Errors at the storage layer are not modelled — the
+// runtime wrappers `.expect()` them, matching state.rs's current behavior.
+
+#[verifier::external_body]
+pub fn ax_account_get(m: &SyncMapView<AccountOwner, Amount>, k: &AccountOwner) -> (r: Option<Amount>)
+    ensures
+        r == if account_map_view(m).dom().contains(*k) {
+            Some(account_map_view(m)[*k])
+        } else {
+            None
+        },
+{
+    m.get(k).expect("ax_account_get failed")
+}
+
+#[verifier::external_body]
+pub fn ax_account_insert(m: &mut SyncMapView<AccountOwner, Amount>, k: &AccountOwner, v: Amount)
+    ensures
+        account_map_view(final(m)) == account_map_view(old(m)).insert(*k, v),
+{
+    m.insert(k, v).expect("ax_account_insert failed");
+}
+
+#[verifier::external_body]
+pub fn ax_account_remove(m: &mut SyncMapView<AccountOwner, Amount>, k: &AccountOwner)
+    ensures
+        account_map_view(final(m)) == account_map_view(old(m)).remove(*k),
+{
+    m.remove(k).expect("ax_account_remove failed");
+}
+
+// -- Allowance-map point-op wrappers -----------------------------------
+// Same pattern as the account map, specialized to (OwnerSpender, Amount).
+
+#[verifier::external_body]
+pub fn ax_allowance_get(m: &SyncMapView<OwnerSpender, Amount>, k: &OwnerSpender) -> (r: Option<Amount>)
+    ensures
+        r == if allowance_map_view(m).dom().contains(*k) {
+            Some(allowance_map_view(m)[*k])
+        } else {
+            None
+        },
+{
+    m.get(k).expect("ax_allowance_get failed")
+}
+
+#[verifier::external_body]
+pub fn ax_allowance_insert(m: &mut SyncMapView<OwnerSpender, Amount>, k: &OwnerSpender, v: Amount)
+    ensures
+        allowance_map_view(final(m)) == allowance_map_view(old(m)).insert(*k, v),
+{
+    m.insert(k, v).expect("ax_allowance_insert failed");
+}
+
+#[verifier::external_body]
+pub fn ax_allowance_remove(m: &mut SyncMapView<OwnerSpender, Amount>, k: &OwnerSpender)
+    ensures
+        allowance_map_view(final(m)) == allowance_map_view(old(m)).remove(*k),
+{
+    m.remove(k).expect("ax_allowance_remove failed");
 }
 
 } // verus!
