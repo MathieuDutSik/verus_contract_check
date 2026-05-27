@@ -6,8 +6,59 @@
 #[path = "core.rs"]
 pub mod fungible_core;
 
-// BigUint axiomatization is blocked on Verus's external_trait_specification
-// one-bound restriction. See mvx_axioms.rs for the analysis.
+// MultiversX-specific axiomatization of BigUint, ManagedAddress, and the
+// ManagedTypeApi trait hierarchy.
+pub mod mvx_axioms;
+
+// Verified BigUint transfer kernel. Operates on the abstract `nat` view of
+// BigUint values; conservation is proven at that level. Sits outside the
+// macro module so Verus can parse it; the contract endpoint calls into it.
+use mvx_axioms::{biguint_ge, biguint_sub, biguint_add_assign};
+use multiversx_sc::api::ManagedTypeApi;
+use multiversx_sc::types::BigUint;
+
+vstd::prelude::verus! {
+    #[cfg(verus_only)]
+    use vstd::prelude::*;
+    #[cfg(verus_only)]
+    use mvx_axioms::biguint_val;
+
+    /// Verified BigUint transfer: returns the new (from, to) balance pair
+    /// such that `from_next + to_next == from_balance + to_balance` and
+    /// each side moves by exactly `amount`. Fails with `Err(())` on
+    /// underflow.
+    ///
+    /// No overflow precondition — BigUint is unbounded by construction, so
+    /// addition is unconditional. The `u128` version in `fungible_core`
+    /// must check `to_balance + amount <= u128::MAX`; the BigUint version
+    /// does not.
+    pub fn verified_transfer_big<M: ManagedTypeApi>(
+        from_balance: BigUint<M>,
+        to_balance:   BigUint<M>,
+        amount:       &BigUint<M>,
+    ) -> (r: Result<(BigUint<M>, BigUint<M>), ()>)
+        ensures
+            match r {
+                Ok((from_next, to_next)) =>
+                    biguint_val(&from_next) + biguint_val(&to_next)
+                        == biguint_val(&from_balance) + biguint_val(&to_balance)
+                    && biguint_val(&from_next)
+                        == (biguint_val(&from_balance) - biguint_val(amount)) as nat
+                    && biguint_val(&to_next)
+                        == biguint_val(&to_balance) + biguint_val(amount),
+                Err(()) =>
+                    biguint_val(&from_balance) < biguint_val(amount),
+            },
+    {
+        if !biguint_ge(&from_balance, amount) {
+            return Err(());
+        }
+        let from_next = biguint_sub(from_balance, amount);
+        let mut to_next = to_balance;
+        biguint_add_assign(&mut to_next, amount);
+        Ok((from_next, to_next))
+    }
+}
 
 multiversx_sc::imports!();
 
@@ -25,9 +76,14 @@ pub trait Fungible {
         let from = self.blockchain().get_caller();
         require!(from != to, "self-transfer");
         let from_balance = self.balances(&from).get();
-        require!(from_balance >= amount, "insufficient balance");
-        self.balances(&from).set(&(from_balance - &amount));
-        self.balances(&to).update(|b| *b += &amount);
+        let to_balance   = self.balances(&to).get();
+        // Routes through the verified BigUint kernel. The kernel proves
+        // `from_next + to_next == from_balance + to_balance` and each
+        // side moves by `amount` — conservation at the BigUint level.
+        let (from_next, to_next) = crate::verified_transfer_big(from_balance, to_balance, &amount)
+            .unwrap_or_else(|_| sc_panic!("insufficient balance"));
+        self.balances(&from).set(&from_next);
+        self.balances(&to).set(&to_next);
     }
 
     #[view(balanceOf)]
