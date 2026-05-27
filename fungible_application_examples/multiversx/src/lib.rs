@@ -2,11 +2,12 @@
 
 // Chain-agnostic verified core (Layer 1): arithmetic + State<A> + conservation
 // lemmas. Lives outside the `#[multiversx_sc::contract]` macro module so
-// Verus can parse it. See TODO.md / DESIGN.md for the per-chain refinement
-// gap — full integration with MultiversX's BigUint/ManagedAddress framework
-// types is deferred.
+// Verus can parse it.
 #[path = "core.rs"]
 pub mod fungible_core;
+
+// BigUint axiomatization is blocked on Verus's external_trait_specification
+// one-bound restriction. See mvx_axioms.rs for the analysis.
 
 multiversx_sc::imports!();
 
