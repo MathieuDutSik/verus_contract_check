@@ -454,12 +454,13 @@ pub proof fn lemma_balance_map_burn_matches_state<A>(
 // variants they need; the others remain unconstructed. Defined inside
 // `verus!{}` so verified code can return/match on it.
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum TransferError {
     SelfTransfer,
     Insufficient,
     Overflow,
     InsufficientAllowance,
+    InsufficientSupply,
     Unauthorized,
 }
 

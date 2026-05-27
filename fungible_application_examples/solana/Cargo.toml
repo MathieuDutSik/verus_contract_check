@@ -11,6 +11,7 @@ solana-program = "2"
 borsh = "1"
 thiserror = "1"
 vstd = "=0.0.0-2026-05-17-0151"
+verus_fungible_core = { path = "../core" }
 
 [features]
 no-entrypoint = []

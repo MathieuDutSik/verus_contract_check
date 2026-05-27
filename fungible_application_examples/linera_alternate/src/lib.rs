@@ -13,6 +13,11 @@ pub mod core;
 // transfer_from machinery that sits on top of the chain-agnostic core.
 pub mod verified_helpers;
 
+// Axiomatization of linera SDK types we depend on (Amount, AccountOwner,
+// OwnerSpender). SyncMapView axiomatization is still deferred — see
+// TODO.md / linera_axioms.rs.
+pub mod linera_axioms;
+
 pub use linera_sdk::abis::fungible::*;
 use linera_sdk::linera_base_types::{Account, AccountOwner, Amount};
 use serde::{Deserialize, Serialize};

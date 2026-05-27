@@ -183,6 +183,7 @@ dependencies = [
  "ic-cdk-macros",
  "ic-stable-structures",
  "serde",
+ "verus_fungible_core",
  "vstd",
 ]
 
@@ -576,6 +577,13 @@ dependencies = [
  "synstructure",
  "verus_prettyplease",
  "verus_syn",
+]
+
+[[package]]
+name = "verus_fungible_core"
+version = "0.1.0"
+dependencies = [
+ "vstd",
 ]
 
 [[package]]

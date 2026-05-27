@@ -62,21 +62,29 @@ impl Fungible {
         read_balance(&self.balances, account)
     }
 
+    /// Test-only entry point. Production code goes through
+    /// `verified_transfer` (which reads the sender from the runtime via
+    /// `msg::source()`). Tests need to inject a sender, so this thin
+    /// wrapper forwards to the same verified `apply_transfer` kernel and
+    /// maps the closed `TransferError` enum back to a string.
     pub fn do_transfer(&mut self, from: ActorId, to: ActorId, amount: u128) -> Result<(), &'static str> {
-        if from == to { return Err("self-transfer"); }
-        let src = self.balance_of(&from);
-        let src_next = src.checked_sub(amount).ok_or("insufficient balance")?;
-        let dst = self.balance_of(&to);
-        let dst_next = dst.checked_add(amount).ok_or("balance overflow")?;
-        save_balance(&mut self.balances, from, src_next);
-        save_balance(&mut self.balances, to, dst_next);
-        Ok(())
+        match apply_transfer(&mut self.balances, from, to, amount) {
+            Ok(())                              => Ok(()),
+            Err(TransferError::SelfTransfer)    => Err("self-transfer"),
+            Err(TransferError::Insufficient)    => Err("insufficient balance"),
+            Err(TransferError::Overflow)        => Err("balance overflow"),
+            // Variants the gear contract doesn't construct.
+            Err(_)                              => Err("transfer failed"),
+        }
     }
 }
 
 // Verified helpers: same pattern as the other chains. The exec helpers
 // take the HashMap directly via small read/save wrappers (vstd doesn't
 // have native specs for hashbrown's HashMap).
+// TransferError + the generic balance helpers live in `verus_fungible_core`.
+pub use verus_fungible_core::TransferError;
+
 vstd::prelude::verus! {
     #[cfg(verus_only)]
     use vstd::prelude::*;
@@ -84,27 +92,8 @@ vstd::prelude::verus! {
     use vstd::map::Map as SpecMap;
     #[cfg(verus_only)]
     use crate::gear_axioms::the_sender;
-
-    #[derive(PartialEq, Eq)]
-    pub enum TransferError {
-        SelfTransfer,
-        Insufficient,
-        Overflow,
-    }
-
-    pub open spec fn balance_at(m: SpecMap<ActorId, u128>, k: ActorId) -> u128 {
-        if m.dom().contains(k) { m[k] } else { 0u128 }
-    }
-
-    pub open spec fn transfer_balances_map(
-        m: SpecMap<ActorId, u128>,
-        sender: ActorId,
-        receiver: ActorId,
-        amount: u128,
-    ) -> SpecMap<ActorId, u128> {
-        m.insert(sender,   (balance_at(m, sender) - amount) as u128)
-         .insert(receiver, (balance_at(m, receiver) + amount) as u128)
-    }
+    #[cfg(verus_only)]
+    use verus_fungible_core::{balance_at, transfer_balances_map};
 
     /// Abstract view of an `AxHashMap<ActorId, u128>` as a SpecMap.
     /// Uninterpreted; only the read/save wrappers below say anything
@@ -125,23 +114,25 @@ vstd::prelude::verus! {
         m.inner.insert(k, v);
     }
 
-    /// Verified transfer step: reads the sender via the axiomatized
-    /// `source()`, rejects self-transfer, then mutates the balances map.
-    pub fn verified_transfer(
+    /// Verified transfer kernel: the substantive arithmetic + storage
+    /// effect. Takes `sender` as an explicit parameter so it can be
+    /// shared between the production path (which reads sender from
+    /// `msg::source()`) and the test path (which injects sender).
+    pub fn apply_transfer(
         balances: &mut AxHashMap<ActorId, u128>,
+        sender:   ActorId,
         receiver: ActorId,
         amount:   u128,
     ) -> (r: Result<(), TransferError>)
         ensures
             match r {
                 Ok(()) =>
-                    the_sender() != receiver
+                    sender != receiver
                     && view_map(final(balances))
-                        == transfer_balances_map(view_map(old(balances)), the_sender(), receiver, amount),
+                        == transfer_balances_map(view_map(old(balances)), sender, receiver, amount),
                 Err(_) => true,
             },
     {
-        let sender = crate::gear_axioms::source();
         if sender == receiver {
             return Err(TransferError::SelfTransfer);
         }
@@ -162,6 +153,27 @@ vstd::prelude::verus! {
             }
         }
     }
+
+    /// Verified transfer entry point. Reads the sender via the axiomatized
+    /// `source()`, then delegates to `apply_transfer`. This is what
+    /// production `handle()` calls.
+    pub fn verified_transfer(
+        balances: &mut AxHashMap<ActorId, u128>,
+        receiver: ActorId,
+        amount:   u128,
+    ) -> (r: Result<(), TransferError>)
+        ensures
+            match r {
+                Ok(()) =>
+                    the_sender() != receiver
+                    && view_map(final(balances))
+                        == transfer_balances_map(view_map(old(balances)), the_sender(), receiver, amount),
+                Err(_) => true,
+            },
+    {
+        let sender = crate::gear_axioms::source();
+        apply_transfer(balances, sender, receiver, amount)
+    }
 }
 
 static mut STATE: Option<Fungible> = None;
@@ -180,11 +192,13 @@ extern "C" fn init() {
 #[no_mangle]
 extern "C" fn handle() {
     let action: Action = msg::load().expect("handle payload");
-    let from = msg::source();
     let s = state();
     match action {
         Action::Transfer { to, amount } => {
-            s.do_transfer(from, to, amount).expect("transfer");
+            // Routes through the verified kernel. Sender is read inside
+            // `verified_transfer` via the axiomatized `msg::source()` wrapper.
+            let from = msg::source();
+            verified_transfer(&mut s.balances, to, amount).expect("transfer");
             msg::reply(Event::Transferred { from, to, amount }, 0).expect("reply");
         }
         Action::BalanceOf { account } => {

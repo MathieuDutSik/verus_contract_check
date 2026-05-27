@@ -32,6 +32,8 @@ use near_sdk::{env, near, AccountId, BorshStorageKey, PanicOnDefault};
 vstd::prelude::verus! {
     #[cfg(verus_only)]
     use vstd::prelude::*;
+    #[cfg(verus_only)]
+    use verus_fungible_core::{balance_at, transfer_balances_map, nat_balances};
 
     /// Panic with `msg`; never returns. Wraps `env::panic_str`. The
     /// `ensures false` postcondition models divergence — any caller will
@@ -99,24 +101,6 @@ vstd::prelude::verus! {
         apply_transfer(balances, sender, receiver, amount);
     }
 
-    /// Balance of `k` in the map, with absent entries treated as 0.
-    pub open spec fn balance_at(m: Map<AccountId, u128>, k: AccountId) -> u128 {
-        if m.dom().contains(k) { m[k] } else { 0u128 }
-    }
-
-    /// The map after `state_after_transfer`'s balance update — same shape
-    /// as `core::state_after_transfer(...).balances` (just in `u128`-land
-    /// instead of `nat`-land).
-    pub open spec fn transfer_balances_map(
-        m: Map<AccountId, u128>,
-        sender: AccountId,
-        receiver: AccountId,
-        amount: u128,
-    ) -> Map<AccountId, u128> {
-        m.insert(sender,   (balance_at(m, sender) - amount) as u128)
-         .insert(receiver, (balance_at(m, receiver) + amount) as u128)
-    }
-
     pub fn apply_transfer(
         balances: &mut AxLookupMap<AccountId, u128>,
         sender: AccountId,
@@ -141,91 +125,10 @@ vstd::prelude::verus! {
         }
     }
 
-    // ---- Connection to `core::State` ----------------------------------
-    //
-    // `apply_transfer` operates on `u128` storage. `core::State<A>` and
-    // `core::state_after_transfer` operate on `nat` (for unbounded
-    // arithmetic in proofs). The bridge is `nat_balances`, lifting
-    // `u128`-valued maps to `nat`-valued maps point-wise.
-
-    /// Lift a `u128`-valued balance map into the `nat`-valued spec map.
-    pub open spec fn nat_balances(m: Map<AccountId, u128>) -> Map<AccountId, nat> {
-        Map::new(
-            |a: AccountId| m.dom().contains(a),
-            |a: AccountId| m[a] as nat,
-        )
-    }
-
-    /// Refinement lemma: the `u128`-level transfer (`transfer_balances_map`)
-    /// matches the `nat`-level transfer (`core::state_after_transfer`'s
-    /// `.balances`) when viewed through `nat_balances`, *provided* the
-    /// arithmetic doesn't under/overflow (which `apply_transfer` enforces
-    /// at the call site by panicking on Err from `transfer_balances`).
-    /// A separate `view_fungible(&Fungible) -> core::State<AccountId>`
-    /// lift would let us state Fungible::transfer's spec end-to-end, but
-    /// requires either (a) `external_type_specification` plus field-
-    /// accessor axioms for the macro-wrapped `Fungible` struct, or (b)
-    /// rewriting the contract to avoid `#[near(contract_state)]`. Both
-    /// are deferred — this lemma already establishes the substantive
-    /// refinement at the storage layer.
-    pub proof fn lemma_apply_transfer_matches_state(
-        balances_pre:  Map<AccountId, u128>,
-        sender:        AccountId,
-        receiver:      AccountId,
-        amount:        u128,
-    )
-        requires
-            sender != receiver,
-            // Match `state_after_transfer`'s recommends; the absent-key
-            // case is covered by the map-level `apply_transfer` ensures
-            // and is outside the scope of this state-refinement lemma.
-            balances_pre.dom().contains(sender),
-            balances_pre.dom().contains(receiver),
-            balances_pre[sender] >= amount,
-            balances_pre[receiver] as int + amount as int <= u128::MAX as int,
-        ensures
-            nat_balances(transfer_balances_map(balances_pre, sender, receiver, amount))
-                == crate::core::state_after_transfer(
-                    crate::core::State {
-                        total_supply: 0nat,
-                        balances:     nat_balances(balances_pre),
-                    },
-                    sender, receiver, amount as nat,
-                ).balances,
-    {
-        let bp = balances_pre;
-        let f  = bp[sender];
-        let t  = bp[receiver];
-        let lhs = nat_balances(
-            bp.insert(sender,   (f - amount) as u128)
-              .insert(receiver, (t + amount) as u128)
-        );
-        let rhs = crate::core::state_after_transfer(
-            crate::core::State {
-                total_supply: 0nat,
-                balances:     nat_balances(bp),
-            },
-            sender, receiver, amount as nat,
-        ).balances;
-
-        assert(lhs.dom() =~= rhs.dom());
-
-        assert forall|k: AccountId| #[trigger] lhs.dom().contains(k)
-            implies lhs[k] == rhs[k]
-        by {
-            if k == sender {
-                // Both reduce to (f - amount) as nat, by the precondition
-                // f >= amount.
-            } else if k == receiver {
-                // Both reduce to (t + amount) as nat, by the precondition
-                // t + amount <= u128::MAX.
-            } else {
-                // k ∈ bp.dom(); both sides leave it at bp[k] as nat.
-                assert(bp.dom().contains(k));
-            }
-        }
-        assert(lhs =~= rhs);
-    }
+    // `nat_balances`, `lemma_apply_transfer_matches_state`, `balance_at`,
+    // and `transfer_balances_map` previously lived here; they now live in
+    // `verus_fungible_core` and are imported above. The refinement lemma
+    // is `lemma_balance_map_transfer_matches_state` in the shared crate.
 }
 
 #[derive(BorshStorageKey)]

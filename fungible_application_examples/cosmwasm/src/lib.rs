@@ -540,6 +540,7 @@ fn map_transfer_error(e: TransferError) -> ContractError {
         TransferError::Insufficient          => ContractError::Insufficient,
         TransferError::Overflow              => ContractError::Overflow,
         TransferError::InsufficientAllowance => ContractError::InsufficientAllowance,
+        TransferError::InsufficientSupply    => ContractError::Insufficient,
         TransferError::Unauthorized          => ContractError::Unauthorized,
     }
 }

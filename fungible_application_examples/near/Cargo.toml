@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 near-sdk = "5"
 borsh = "1"
 vstd = "=0.0.0-2026-05-17-0151"
+verus_fungible_core = { path = "../core" }
 
 [dev-dependencies]
 # Activates near-sdk's `unit-testing` feature for `cargo test --target $HOST`

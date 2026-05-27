@@ -40,6 +40,9 @@ pub struct State {
 
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
+// TransferError + the generic balance helpers live in `verus_fungible_core`.
+pub use verus_fungible_core::TransferError;
+
 // Verified helpers — all the substantive logic lives here, proven against
 // vstd's BTreeMap axioms.
 vstd::prelude::verus! {
@@ -49,32 +52,8 @@ vstd::prelude::verus! {
     use vstd::map::Map as SpecMap;
     #[cfg(verus_only)]
     use crate::ic_axioms::the_caller;
-
-    /// Failure modes of the verified helpers.
-    #[derive(PartialEq, Eq)]
-    pub enum TransferError {
-        SelfTransfer,
-        Insufficient,
-        Overflow,
-        InsufficientAllowance,
-        Unauthorized,
-    }
-
-    /// Balance of `k` in the abstract map, with absent entries treated as 0.
-    pub open spec fn balance_at(m: SpecMap<Principal, u128>, k: Principal) -> u128 {
-        if m.dom().contains(k) { m[k] } else { 0u128 }
-    }
-
-    /// The map after a transfer's balance update.
-    pub open spec fn transfer_balances_map(
-        m: SpecMap<Principal, u128>,
-        sender: Principal,
-        receiver: Principal,
-        amount: u128,
-    ) -> SpecMap<Principal, u128> {
-        m.insert(sender,   (balance_at(m, sender) - amount) as u128)
-         .insert(receiver, (balance_at(m, receiver) + amount) as u128)
-    }
+    #[cfg(verus_only)]
+    use verus_fungible_core::{balance_at, transfer_balances_map};
 
     // -- BTreeMap point-op wrappers ------------------------------------
     //
@@ -390,6 +369,7 @@ fn err_to_string(e: TransferError) -> String {
         TransferError::Insufficient          => "insufficient balance".into(),
         TransferError::Overflow              => "balance overflow".into(),
         TransferError::InsufficientAllowance => "insufficient allowance".into(),
+        TransferError::InsufficientSupply    => "insufficient supply".into(),
         TransferError::Unauthorized          => "unauthorized".into(),
     }
 }

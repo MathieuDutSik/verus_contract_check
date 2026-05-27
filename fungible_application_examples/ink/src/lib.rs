@@ -4,6 +4,9 @@
 // lemmas. Lives outside the `#[ink::contract]` module so Verus can see it.
 pub mod core;
 
+// TransferError lives in `verus_fungible_core`.
+pub use verus_fungible_core::TransferError;
+
 // Verified helpers — operate on plain values; no ink-storage primitives
 // involved (those would need a separate axiomatization layer; see TODO.md).
 // The helpers cover the mint/burn arithmetic + supply update; transfer's
@@ -11,15 +14,6 @@ pub mod core;
 vstd::prelude::verus! {
     #[cfg(verus_only)]
     use vstd::prelude::*;
-
-    /// Failure modes shared by transfer/mint/burn helpers.
-    #[derive(PartialEq, Eq)]
-    pub enum TransferError {
-        SelfTransfer,
-        InsufficientBalance,
-        Overflow,
-        InsufficientSupply,
-    }
 
     /// Verified mint arithmetic: `to_balance' = to_balance + amount` and
     /// `total_supply' = total_supply + amount` on success.
@@ -64,7 +58,7 @@ vstd::prelude::verus! {
     {
         let new_bal = match from_balance.checked_sub(amount) {
             Some(v) => v,
-            None    => return Err(TransferError::InsufficientBalance),
+            None    => return Err(TransferError::Insufficient),
         };
         let new_supply = match total_supply.checked_sub(amount) {
             Some(v) => v,
@@ -97,10 +91,12 @@ mod fungible {
 
     fn map_err(e: TE) -> Error {
         match e {
-            TE::SelfTransfer        => Error::SelfTransfer,
-            TE::InsufficientBalance => Error::InsufficientBalance,
-            TE::Overflow            => Error::Overflow,
-            TE::InsufficientSupply  => Error::InsufficientSupply,
+            TE::SelfTransfer          => Error::SelfTransfer,
+            TE::Insufficient          => Error::InsufficientBalance,
+            TE::Overflow              => Error::Overflow,
+            TE::InsufficientSupply    => Error::InsufficientSupply,
+            TE::InsufficientAllowance => Error::Overflow, // unused on ink!
+            TE::Unauthorized          => Error::Overflow, // unused on ink!
         }
     }
 

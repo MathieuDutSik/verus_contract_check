@@ -12,6 +12,7 @@ parity-scale-codec = { version = "3", default-features = false, features = ["der
 scale-info = { version = "2", default-features = false, features = ["derive"] }
 hashbrown = "0.14"
 vstd = { version = "=0.0.0-2026-05-17-0151", default-features = false, features = ["alloc"] }
+verus_fungible_core = { path = "../core" }
 
 [package.metadata.verus]
 verify = true

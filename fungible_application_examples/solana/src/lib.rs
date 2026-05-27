@@ -200,9 +200,9 @@ pub enum Instruction {
 entrypoint!(process_instruction);
 
 #[cfg(not(verus_only))]
-pub fn process_instruction(
+pub fn process_instruction<'a>(
     _program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &'a [AccountInfo<'a>],
     data: &[u8],
 ) -> ProgramResult {
     let instruction = Instruction::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
@@ -558,18 +558,20 @@ fn init_mint(accounts: &[AccountInfo], total_supply: u128) -> ProgramResult {
 }
 
 #[cfg(not(verus_only))]
-fn transfer(accounts: &[AccountInfo], amount: u128) -> ProgramResult {
-    let it = &mut accounts.iter();
-    let signer = next_account_info(it)?;
-    let src    = next_account_info(it)?;
-    let dst    = next_account_info(it)?;
-    if !signer.is_signer { return Err(ProgramError::MissingRequiredSignature); }
-    let mut src_acc = TokenAccount::try_from_slice(&src.data.borrow())?;
-    let mut dst_acc = TokenAccount::try_from_slice(&dst.data.borrow())?;
-    apply_transfer(&mut src_acc, &mut dst_acc, *signer.key, amount).map_err(token_err_to_program_err)?;
-    src_acc.serialize(&mut &mut src.data.borrow_mut()[..])?;
-    dst_acc.serialize(&mut &mut dst.data.borrow_mut()[..])?;
-    Ok(())
+fn transfer<'a>(accounts: &'a [AccountInfo<'a>], amount: u128) -> ProgramResult {
+    // Routes through the verified instruction. The verified body covers
+    // the positional + length check (`accounts.len() >= 3`), the signer
+    // check (`read_is_signer(accounts[0])`), the Borsh round-trip on
+    // accounts[1] / accounts[2], and the substantive `apply_transfer`
+    // arithmetic + writeback. Each of those guarantees holds at the
+    // dispatch level — the two most common Solana bug classes (missing
+    // signer, off-by-one arg count) are structurally impossible here.
+    //
+    // The explicit `<'a>` is required because `AccountInfo<'a>` is
+    // invariant over `'a` and `verified_transfer_instruction` declares
+    // `&'a [AccountInfo<'a>]`; the bare `&[AccountInfo]` would leave the
+    // outer and inner lifetimes unrelated.
+    verified_transfer_instruction(accounts, amount).map_err(token_err_to_program_err)
 }
 
 #[cfg(not(verus_only))]
