@@ -51,6 +51,38 @@
 #pagebreak()
 
 // ===================================================================
+// Slide 1b — Project principle
+// ===================================================================
+= The principle of the project
+
+#v(0.3em)
+
+- *Target Rust-based smart-contract platforms.*\
+  #small[Verus annotates Rust directly, so any chain whose contracts are Rust (or compile via Rust) is in scope. That covers eight major non-EVM platforms.]
+
+#v(0.4em)
+
+- *Verification code lives next to the Rust it verifies.*\
+  #small[`requires` / `ensures` / `proof` blocks sit in the same crate as the code that compiles to wasm. No separate spec artifact to drift.]
+
+#v(0.4em)
+
+- *Axiomatize each blockchain's host semantics.*\
+  #small[SDK types (storage maps, big integers, caller APIs) are declared external; ~30 lines of trusted axioms per chain capture what the runtime guarantees.]
+
+#v(0.4em)
+
+- *Discharge to Z3.*\
+  #small[Classic SMT back-end. Quantifier-free arithmetic and map theories handle the bulk; the proof obligations come from the annotations.]
+
+#v(0.4em)
+
+- *Decompose the hard parts into lemmas.*\
+  #small[Conservation, refinement from `nat` to `u128`, state-level invariants — each proved once as a reusable lemma, then applied at every call site.]
+
+#pagebreak()
+
+// ===================================================================
 // Slide 2 — Hook
 // ===================================================================
 = The bug we want to make impossible
@@ -332,38 +364,6 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg)
 #pagebreak()
 
 // ===================================================================
-// Slide 10 — Case 2: MultiversX BigUint
-// ===================================================================
-= Case 2: MultiversX — when unbounded is *better*
-
-#small[
-MultiversX uses `BigUint<M>`: an *unbounded* arbitrary-precision integer (managed by the runtime). Our shared core uses `u128`. They don't compose — naïve conversion silently truncates.
-]
-
-#v(0.4em)
-
-We axiomatized BigUint directly, mapping it to spec-level `nat`:
-
-```rust
-pub uninterp spec fn biguint_val<M: ManagedTypeApi>(x: &BigUint<M>) -> nat;
-
-pub fn verified_transfer_big<M: ManagedTypeApi>(
-    from_balance: BigUint<M>, to_balance: BigUint<M>, amount: &BigUint<M>,
-) -> Result<(BigUint<M>, BigUint<M>), ()>
-    ensures Ok((from_next, to_next)) =>
-        biguint_val(&from_next) + biguint_val(&to_next)
-            == biguint_val(&from_balance) + biguint_val(&to_balance);
-```
-
-#v(0.5em)
-
-#small[
-*The surprise:* no overflow precondition. BigUint is unbounded, so addition is unconditional. Compare to the `u128` core, which must require `to_balance + amount <= u128::MAX`. *BigUint maps to `nat` more naturally than `u128` does* — provided you can axiomatize the trait machinery.
-]
-
-#pagebreak()
-
-// ===================================================================
 // Slide 11 — The trait-cascade obstacle
 // ===================================================================
 = The obstacle, and the discovery
@@ -399,70 +399,6 @@ pub trait ExManagedTypeApi:
 ```
 
 #small[*Same fix unblocked Linera's `SyncMapView<C, K, V>`*. Pattern is now in the project's DESIGN.md.]
-
-#pagebreak()
-
-// ===================================================================
-// Slide 12 — Case 3: NEAR's Sealed (the wall)
-// ===================================================================
-= Case 3: NEAR — a wall we can't see around
-
-#small[
-`near_sdk::store::LookupMap<K, V, H: ToKey>` is NEAR's persistent storage. `ToKey` has a *private* super-trait:
-]
-
-```rust
-// in near_sdk
-mod private { pub trait Sealed {} }
-pub trait ToKey: private::Sealed { /* ... */ }
-```
-
-#v(0.4em)
-
-Verus needs to declare `ToKey` as external. But `external_trait_specification` requires listing super-traits exactly — and `Sealed`'s path is *not accessible* outside `near_sdk`. We can't write `pub trait ExToKey: Sealed`.
-
-#v(0.4em)
-
-*Workaround*: wrap `LookupMap<K, V, Identity>` in our own `AxLookupMap<K, V>` newtype, specialized to the default hasher. No generic-hasher support.
-
-#v(0.4em)
-
-#small[
-*Lesson*: SDK encapsulation can be a hard wall for whole-program verification. Tools can't see through privacy. This is a real argument for SDK authors to consider verifier-friendliness as a design constraint.
-]
-
-#pagebreak()
-
-// ===================================================================
-// Slide 13 — Numbers
-// ===================================================================
-= What's in the tree
-
-#set text(size: 16pt)
-
-#table(
-  columns: (auto, auto, auto, auto),
-  inset: 7pt,
-  align: (left, right, right, left),
-  table.header(
-    [*Chain*], [*Verified*], [*Tests*], [*Notes*],
-  ),
-  [`verus_fungible_core` (shared)], [12], [—], [arithmetic + State<A> + 3 refinement lemmas],
-  [CosmWasm],   [11], [24], [full cw20 surface, state-level refinement],
-  [NEAR],       [3],  [6],  [verified `transfer`; drift in `core.rs` restored by shared crate],
-  [IC],         [8],  [4],  [full cw20 surface, no state-level refinement yet],
-  [Gear],       [2],  [6],  [`handle()` dispatch routes through verified kernel],
-  [ink!],       [2],  [10], [arithmetic verified; `Mapping` storage gap remains],
-  [MultiversX], [1],  [6],  [`verified_transfer_big` via trait-cascade pattern],
-  [Solana],     [8],  [15], [`process_instruction` dispatches to verified instruction],
-  [Linera],     [8],  [—],  [`credit` / `debit` via `SyncMapView` axiomatization],
-)
-
-#v(0.6em)
-
-#small[
-*All chains: 0 errors.* Trust surface per chain: ~30 lines of axioms + ~5 lines of glue per entry point. Shared crate eliminates ~440 lines of previously duplicated `core.rs` content.
-]
 
 #pagebreak()
 
@@ -526,34 +462,6 @@ Write A doesn't change Account B's view, but our pure-function ghost model doesn
 #v(0.6em)
 
 *4. MultiversX `SingleValueMapper`* and *Linera `verified_approve`*: pieces left when `OwnerSpender::new` panics on `owner == spender`. Both 2-4 days of focused work each.
-
-#pagebreak()
-
-// ===================================================================
-// Slide 16 — Lessons
-// ===================================================================
-= Three lessons
-
-#v(0.5em)
-
-*1. The hardest part is not writing proofs; it's making proofs portable.*\
-#small[
-The conservation theorem was straightforward. Connecting it to eight different SDKs took 80% of the effort.
-]
-
-#v(0.8em)
-
-*2. SDK privacy is the verifier's wall.*\
-#small[
-The single biggest blocker (NEAR's `Sealed`) is a privacy decision in an SDK. Verifier-friendliness should be a design property of platforms.
-]
-
-#v(0.8em)
-
-*3. "Same proof, different host" is the right architectural goal.*\
-#small[
-Three layers — shared core, chain axioms, chain glue — is the minimum that lets the same lemma about conservation cover eight runtimes. Anything less and you redo the proof. Anything more and you can't keep up with SDK churn.
-]
 
 #pagebreak()
 
