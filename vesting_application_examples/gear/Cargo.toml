@@ -1,0 +1,25 @@
+[package]
+name = "vesting-gear"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+gstd = "1.5"
+parity-scale-codec = { version = "3", default-features = false, features = ["derive"] }
+scale-info = { version = "2", default-features = false, features = ["derive"] }
+vstd = { version = "=0.0.0-2026-05-17-0151", default-features = false, features = ["alloc"] }
+verus_vesting_core = { path = "../core" }
+
+[package.metadata.verus]
+verify = true
+
+# Allow the verus_only cfg that `cargo verus` sets during verification.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+
+[profile.release]
+overflow-checks = true
+lto = true

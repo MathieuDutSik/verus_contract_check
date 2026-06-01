@@ -1,0 +1,20 @@
+[package]
+name = "verus_vesting_core"
+version = "0.1.0"
+edition = "2021"
+description = "Chain-agnostic verified linear-vesting core. Time-parameterised State<A>, the vested(t) schedule, monotonicity / boundedness lemmas, and the conservation invariant claimed <= total. Shared by each per-chain vesting crate."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# alloc-only so no_std chains (Gear) can consume the crate. Chains that
+# need std-enabled vstd enable it via their own Cargo dep; Cargo unifies
+# the feature set.
+vstd = { version = "=0.0.0-2026-05-17-0151", default-features = false, features = ["alloc"] }
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }

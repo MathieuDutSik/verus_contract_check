@@ -1,0 +1,22 @@
+[package]
+name = "vesting-multiversx"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+multiversx-sc = "0.66"
+vstd = { version = "=0.0.0-2026-05-17-0151", default-features = false, features = ["alloc"] }
+verus_vesting_core = { path = "../core" }
+
+[dev-dependencies]
+multiversx-sc-scenario = "0.66"
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }

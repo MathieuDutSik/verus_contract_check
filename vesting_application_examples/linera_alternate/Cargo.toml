@@ -1,0 +1,23 @@
+[package]
+name = "vesting-linera"
+version = "0.1.0"
+edition = "2021"
+
+# Verification-focused build: produce an rlib only. The fungible-token
+# Linera alternate example has [[bin]] entries for contract / service
+# binaries that drive the on-chain deployment; we omit them here since
+# the substantive verification artifact is the lib (verified core +
+# verified_claim_step). Wiring up the Contract / Service traits to the
+# linera_sdk macros is unverified glue we can add later.
+
+[dependencies]
+serde = { version = "1.0.197", features = ["derive"] }
+linera-sdk = { git = "https://github.com/MathieuDutSik/linera-protocol_second", branch = "alternate_sync_keyvaluestore" }
+vstd = { version = "=0.0.0-2026-05-17-0151", default-features = false, features = ["alloc"] }
+verus_vesting_core = { path = "../core" }
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
