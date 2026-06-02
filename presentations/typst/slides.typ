@@ -229,40 +229,9 @@ pub fn transfer_balances(
 The common shape is always the same: *(caller, recipient, amount) → two balance reads → two checked-arithmetic updates → two writes.* The question is how much of that can be one proof.
 ]
 
-#pagebreak()
-
-// ===================================================================
-// Slide 7 — Three-layer architecture
-// ===================================================================
-= The three-layer architecture
-
-#align(center)[
-  #set text(size: 18pt)
-  #box(stroke: 1pt + rgb("#444"), inset: 1em, radius: 4pt, width: 90%)[
-    *Layer 3 — chain-specific entry points*\
-    `#[entry_point]` / `#[update]` / `#[ink(message)]` / `extern "C" fn handle()`...\
-    1–10 lines of *unverified* glue per entry. Forwards to:
-  ]
-  #v(0.4em)
-  $arrow.b$
-  #v(0.4em)
-  #box(stroke: 1pt + rgb("#0a7"), inset: 1em, radius: 4pt, width: 90%, fill: rgb("#e0f5e0"))[
-    *Layer 2 — verified helpers* (inside `verus!{}`)\
-    `verified_transfer(storage, sender, receiver, amount) -> Result<...>`\
-    Reads, runs arithmetic, writes. `ensures` describes the abstract storage delta.
-  ]
-  #v(0.4em)
-  $arrow.b$ #h(2em) calls $arrow.b$
-  #v(0.4em)
-  #box(stroke: 1pt + rgb("#07a"), inset: 1em, radius: 4pt, width: 90%, fill: rgb("#e0e8f5"))[
-    *Layer 1 — chain-agnostic core* (`verus_fungible_core` crate)\
-    `transfer_balances : u128, u128, u128 → Result<...>` + conservation lemmas on `State<A>`.\
-    *Byte-identical across all eight chains.*
-  ]
-  #v(0.4em)
-  #box(stroke: (paint: rgb("#a00"), thickness: 1pt, dash: "dashed"), inset: 0.5em, radius: 4pt, width: 90%)[
-    *Trust surface — `<chain>_axioms.rs`*: external_type_specification for SDK types, point-op storage axioms, caller ghost.
-  ]
+#v(0.3em)
+#small[
+*Linera note:* the upstream SDK is async; we work against a *modified, synchronous SDK* so the verified core can call storage directly without an `async` boundary. `SyncMapView` is the sync counterpart of the upstream `MapView`.
 ]
 
 #pagebreak()
