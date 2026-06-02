@@ -31,7 +31,7 @@
 // ===================================================================
 #align(center + horizon)[
   #text(size: 38pt, weight: "bold")[
-    Cross-Chain Smart-Contract Verification
+    Rust Smart-Contract Verification
   ]
   #v(0.3em)
   #text(size: 26pt)[
@@ -337,7 +337,9 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg)
 #v(0.6em)
 
 #small[
-*The tradeoff*: each chain's host semantics is an axiom you write by hand. ~30 lines per chain, trusted, kept small.
+*Missing pieces vs. the Solidity ecosystem:*
+- *Mutation testing.* Certora ships `gambit` / `certora.mutate` to inject mutants and score the spec's catch-rate. Verus has *no equivalent* — spec quality is currently judged by inspection.
+- *Coverage-guided fuzzing.* The role of Echidna / Medusa on Solidity is filled on the Rust side by `cargo-fuzz` (libFuzzer): same property-based loop, same shrinking, complements but does not replace the proofs.
 ]
 
 #pagebreak()
