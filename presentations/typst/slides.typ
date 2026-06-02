@@ -231,7 +231,7 @@ The common shape is always the same: *(caller, recipient, amount) → two balanc
 
 #v(0.3em)
 #small[
-*Linera note:* the upstream SDK is async; we work against a *modified, synchronous SDK* so the verified core can call storage directly without an `async` boundary. `SyncMapView` is the sync counterpart of the upstream `MapView`.
+*Linera note:* the upstream SDK is async; we work against a *modified, synchronous SDK* so the verified core can call storage directly without an `async` boundary.
 ]
 
 #pagebreak()
@@ -349,7 +349,7 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg)
 
 *1. Cross-contract dispatch (reentrancy).*\
 #small[
-Every chain has it: CosmWasm `SubMsg`, NEAR `Promise`, Solana CPI, IC inter-canister, Linera cross-microchain messages. Today's verification stops at one contract's boundary. Cleanly modelling "between our return and the reply, an attacker can re-enter" requires an uninterpreted-relation framing. ~2–4 weeks per chain. *This is where production-cw20 bugs concentrate.*
+Every chain has it: CosmWasm `SubMsg`, NEAR `Promise`, Solana CPI, IC inter-canister, Linera cross-microchain messages. Today's verification stops at one contract's boundary. Cleanly modelling "between our return and the reply, an attacker can re-enter" requires an uninterpreted-relation framing. *This is where production-cw20 bugs concentrate.*
 ]
 
 #v(0.6em)
@@ -363,9 +363,9 @@ IC, Linera have verified kernels but no `nat_balances`-bridged conservation theo
 
 *3. The Solana framing layer.*\
 #small[
-Write A doesn't change Account B's view, but our pure-function ghost model doesn't say that. Needs explicit `tracked` ghost state. ~1 week.
+Write A doesn't change Account B's view, but our pure-function ghost model doesn't say that. Needs explicit `tracked` ghost state.
 ]
 
 #v(0.6em)
 
-*4. MultiversX `SingleValueMapper`* and *Linera `verified_approve`*: pieces left when `OwnerSpender::new` panics on `owner == spender`. Both 2-4 days of focused work each.
+*4. MultiversX `SingleValueMapper`* and *Linera `verified_approve`*: pieces left when `OwnerSpender::new` panics on `owner == spender`.
