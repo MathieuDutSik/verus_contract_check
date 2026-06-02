@@ -55,6 +55,18 @@
 // ===================================================================
 = The principle of the project
 
+#v(0.2em)
+
+#small[
+Source: #link("https://github.com/MathieuDutSik/verus_contract_check")[`github.com/MathieuDutSik/verus_contract_check`]
+]
+
+#v(0.2em)
+
+#small[
+*Scope:* implement and verify the ERC-20 surface — `balance_of`, `transfer`, and the `approve` / `allowance` / `transfer_from` allowance machinery — across each chain.
+]
+
 #v(0.3em)
 
 - *Target Rust-based smart-contract platforms.*\
@@ -185,41 +197,6 @@ pub fn transfer_balances(
 ```
 
 #small[Verus discharges this to Z3. ~1 second on a laptop. The function *cannot* be implemented incorrectly and still typecheck.]
-
-#pagebreak()
-
-// ===================================================================
-// Slide 5 — Cross-chain framing
-// ===================================================================
-= The question this work answers
-
-#v(0.5em)
-
-Most verification work targets one platform.
-EVM/Solidity is the obvious one (K-framework, Certora, Slither).
-
-#v(1em)
-
-But there are *eight major non-EVM smart-contract platforms*:
-
-#align(center)[
-  #box(inset: 0.5em)[
-    *CosmWasm · NEAR · Internet Computer · Gear · ink! ·*\
-    *MultiversX · Solana · Linera*
-  ]
-]
-
-#v(1em)
-
-Each has its own SDK, storage primitive, caller-resolution mechanism, error idiom. *Naïve verification = one project per chain.*
-
-#v(1em)
-
-#align(center)[
-  #text(weight: "bold", size: 26pt)[
-    What is the right *shape* of a verification project so that the proof is portable?
-  ]
-]
 
 #pagebreak()
 
@@ -364,45 +341,6 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg)
 #pagebreak()
 
 // ===================================================================
-// Slide 11 — The trait-cascade obstacle
-// ===================================================================
-= The obstacle, and the discovery
-
-`BigUint<M: ManagedTypeApi>` requires Verus to know `ManagedTypeApi`, which has *five super-traits*:
-
-#align(center)[
-  `ManagedTypeApi: HandleTypeInfo + StaticVarApi + ErrorApi + Clone + 'static`
-]
-
-#v(0.5em)
-
-Three forms I tried failed:
-
-#small[
-1. `type ExternalTraitSpecificationFor: ManagedTypeApi + HandleTypeInfo + ...;`\
-  → *only one bound allowed*.
-2. `where Self::ExternalTraitSpecificationFor: HandleTypeInfo, ...` on the associated type → *bounds don't match exactly*.
-3. Proxy-trait inheritance `pub trait ExManagedTypeApi: ExHandleTypeInfo + ...` → Verus sees the inherited bounds but *doesn't equate proxy names with external trait names*.
-]
-
-#v(0.5em)
-
-The form that *does* work — put the external traits in the proxy's super-trait list directly:
-
-```rust
-#[verifier::external_trait_specification]
-pub trait ExManagedTypeApi:
-    HandleTypeInfo + StaticVarApi + ErrorApi + Clone + 'static
-{
-    type ExternalTraitSpecificationFor: ManagedTypeApi;
-}
-```
-
-#small[*Same fix unblocked Linera's `SyncMapView<C, K, V>`*. Pattern is now in the project's DESIGN.md.]
-
-#pagebreak()
-
-// ===================================================================
 // Slide 14 — Comparison
 // ===================================================================
 = Where this sits in the verification landscape
@@ -462,28 +400,3 @@ Write A doesn't change Account B's view, but our pure-function ghost model doesn
 #v(0.6em)
 
 *4. MultiversX `SingleValueMapper`* and *Linera `verified_approve`*: pieces left when `OwnerSpender::new` panics on `owner == spender`. Both 2-4 days of focused work each.
-
-#pagebreak()
-
-// ===================================================================
-// Slide 17 — Closing
-// ===================================================================
-#align(center + horizon)[
-  #text(size: 36pt, weight: "bold")[
-    Eight chains. One conservation theorem.\
-    Zero verification errors.
-  ]
-
-  #v(2em)
-
-  #text(size: 24pt)[
-    The bug class that lives in fungible-token contracts since 2016\
-    is now structurally impossible across this proof surface.
-  ]
-
-  #v(2em)
-
-  #text(size: 22pt, fill: rgb("#555"))[
-    Questions?
-  ]
-]
