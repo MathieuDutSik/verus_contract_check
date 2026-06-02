@@ -1,23 +1,20 @@
 // MultiversX linear-with-cliff vesting contract with a Verus-verified
 // core.
 //
-// Layout:
-//   - `pub mod vesting_core;` — re-export of the chain-agnostic core.
-//                               (Named `vesting_core` not `core` because
-//                               the `#[multiversx_sc::contract]` macro
-//                               expansion references `::core::mem`,
-//                               which a `mod core;` would shadow.)
-//   - `pub mod mvx_axioms;`   — MultiversX-specific axioms:
-//                               ManagedAddress, ManagedTypeApi cascade,
-//                               `the_caller<M>()`, `the_now_secs()`.
-//   - `verified_claim_step`   — the substantive logic (caller-check,
-//                               schedule arithmetic, monotonicity
-//                               proof), sitting OUTSIDE the
-//                               `#[multiversx_sc::contract]` macro
-//                               module so Verus can see it.
-//   - The `#[multiversx_sc::contract]` trait `Vesting` — entry points
-//                               that read storage mappers and forward
-//                               to the verified helper.
+// Layout (mirrors `linera_alternate` fungible):
+//   - `pub mod vesting_core;`      — re-export of the chain-agnostic
+//                                    core. Renamed from `core.rs` so
+//                                    `mod core;` doesn't shadow the
+//                                    `::core::mem` paths the macro
+//                                    expansion emits.
+//   - `pub mod mvx_axioms;`        — MultiversX runtime axioms:
+//                                    ManagedAddress, ManagedTypeApi
+//                                    cascade, `the_caller<M>()`,
+//                                    `the_now_secs()`.
+//   - `pub mod verified_helpers;`  — `verified_claim_step` kernel.
+//   - this file                    — `#[multiversx_sc::contract]` trait
+//                                    `Vesting` with endpoints + storage
+//                                    mappers + tests.
 //
 // All amounts are in `u128`, all times in `u64` seconds (matching
 // MultiversX's `get_block_timestamp()` unit). The fungible MultiversX
@@ -36,88 +33,11 @@
 #[path = "vesting_core.rs"]
 pub mod vesting_core;
 pub mod mvx_axioms;
+pub mod verified_helpers;
 
-use multiversx_sc::api::ManagedTypeApi;
-use multiversx_sc::types::ManagedAddress;
+pub use verified_helpers::{verified_claim_step, ClaimError};
+
 use verus_vesting_core::{compute_claim, compute_vested, Params};
-
-// =====================================================================
-// Verified claim step (outside the #[contract] macro module)
-// =====================================================================
-
-vstd::prelude::verus! {
-    #[cfg(verus_only)]
-    use vstd::prelude::*;
-    #[cfg(verus_only)]
-    use crate::vesting_core::{
-        State as CoreState, claimable_at, lemma_vested_bounded, state_after_claim,
-    };
-
-    /// Errors the verified claim helper raises.
-    #[derive(PartialEq, Eq, Debug)]
-    pub enum ClaimError {
-        Unauthorized,
-        ArithOverflow,
-    }
-
-    /// Verified claim kernel. The contract endpoint reads the caller
-    /// (via `self.blockchain().get_caller()`) and the block timestamp
-    /// (via `self.blockchain().get_block_timestamp()`), then forwards
-    /// them here with the stored `beneficiary` and `params`.
-    ///
-    /// `ensures` (success path):
-    ///
-    ///   - authorisation: `caller == beneficiary`.
-    ///   - state-level connection: `*final(claimed) ==
-    ///     state_after_claim(...).claimed`.
-    ///   - monotonicity: `*final(claimed) >= *old(claimed)`.
-    ///   - the returned amount equals the delta in `claimed`.
-    pub fn verified_claim_step<M: ManagedTypeApi>(
-        caller:      ManagedAddress<M>,
-        now_secs:    u64,
-        beneficiary: ManagedAddress<M>,
-        params:      &Params,
-        claimed:     &mut u128,
-    ) -> (r: Result<u128, ClaimError>)
-        requires
-            params.well_formed(),
-            (*old(claimed) as nat) <= (params.total as nat),
-        ensures
-            *final(claimed) >= *old(claimed),
-            match r {
-                Ok(amount) => {
-                    &&& caller == beneficiary
-                    &&& amount as int
-                        == (*final(claimed) as int) - (*old(claimed) as int)
-                    &&& *final(claimed) as int
-                        == state_after_claim::<ManagedAddress<M>>(
-                                CoreState {
-                                    beneficiary,
-                                    params:      *params,
-                                    claimed:     *old(claimed),
-                                },
-                                now_secs,
-                           ).claimed as int
-                }
-                Err(_) => true,
-            },
-    {
-        if !(caller == beneficiary) {
-            return Err(ClaimError::Unauthorized);
-        }
-        let amount = match compute_claim(params, now_secs, *claimed) {
-            Ok(a)  => a,
-            Err(_) => return Err(ClaimError::ArithOverflow),
-        };
-        proof {
-            lemma_vested_bounded(*params, now_secs);
-        }
-        if amount > 0 {
-            *claimed = *claimed + amount;
-        }
-        Ok(amount)
-    }
-}
 
 // =====================================================================
 // MultiversX contract trait — entry points + storage mappers.

@@ -3,9 +3,20 @@
 // `#[ink::contract]` decorates an entire module — the macro expansion
 // produces wasm bindings, ABI marshalling, and dispatch code that
 // Verus can't parse. So the verified helpers live *outside* the
-// `#[ink::contract]` module, operating on plain values. The contract
+// `#[ink::contract]` module, in `verified_helpers.rs`. The contract
 // module reads from `#[ink(storage)]` fields, calls `Self::env()` for
 // runtime info, and forwards to the verified helpers.
+//
+// Layout (mirrors `linera_alternate` fungible):
+//   - `pub mod core;`              — chain-agnostic verified core.
+//   - `pub mod ink_axioms;`        — `AccountId` external type spec +
+//                                    PartialEq axiom. (Small surface:
+//                                    no time/caller ghosts because both
+//                                    are method parameters on ink.)
+//   - `pub mod verified_helpers;`  — `verified_claim_step` +
+//                                    `ClaimError` enum.
+//   - this file                    — the `#[ink::contract]` module
+//                                    with storage + messages + tests.
 //
 // Caller and time are *parameters* to the verified helper (set inside
 // the contract method via `self.env().caller()` and
@@ -26,103 +37,10 @@
 // monotonicity lemmas. Lives outside the `#[ink::contract]` module so
 // Verus can see it.
 pub mod core;
+pub mod ink_axioms;
+pub mod verified_helpers;
 
-use ink::primitives::AccountId;
-use verus_vesting_core::{compute_claim, Params};
-
-// =====================================================================
-// Verified helpers (Layer 2, outside the #[ink::contract] module)
-// =====================================================================
-
-vstd::prelude::verus! {
-    #[cfg(verus_only)]
-    use vstd::prelude::*;
-    #[cfg(verus_only)]
-    use crate::core::{
-        State as CoreState, claimable_at, lemma_vested_bounded, state_after_claim,
-    };
-
-    // ink's AccountId is `pub struct AccountId(pub [u8; 32])` —
-    // axiomatised here so we can compare caller and beneficiary in the
-    // verified helper. Adding the spec is straightforward: the type
-    // wraps an array, no transitive generic types to worry about.
-    #[verifier::external_type_specification]
-    #[verifier::external_body]
-    pub struct ExAccountId(#[allow(dead_code)] AccountId);
-
-    pub assume_specification
-        [ <AccountId as ::core::cmp::PartialEq>::eq ]
-        (a: &AccountId, b: &AccountId) -> (r: bool)
-        ensures r == (*a == *b);
-
-    /// Errors the verified claim helper raises. Mapped to the
-    /// contract's `Error` enum in the `#[ink(message)] fn claim`
-    /// glue.
-    #[derive(PartialEq, Eq, Debug)]
-    pub enum ClaimError {
-        Unauthorized,
-        ArithOverflow,
-    }
-
-    /// Verified claim step. The contract method reads `caller` and
-    /// `now_ms` from the ink env, the stored `beneficiary` and
-    /// `params` from `#[ink(storage)]`, and forwards them here. The
-    /// helper authorises, schedules, and mutates `claimed`.
-    ///
-    /// `ensures` (success path):
-    ///
-    ///   - authorisation: `caller == beneficiary`.
-    ///   - state-level connection: post `claimed` is exactly
-    ///     `state_after_claim(...).claimed` on the abstract
-    ///     `State<AccountId>` reconstructed from the parameters.
-    ///   - monotonicity: `*final(claimed) >= *old(claimed)`.
-    ///   - the returned amount equals the delta in `claimed`.
-    pub fn verified_claim_step(
-        caller:      AccountId,
-        now_ms:      u64,
-        beneficiary: AccountId,
-        params:      &Params,
-        claimed:     &mut u128,
-    ) -> (r: Result<u128, ClaimError>)
-        requires
-            params.well_formed(),
-            (*old(claimed) as nat) <= (params.total as nat),
-        ensures
-            *final(claimed) >= *old(claimed),
-            match r {
-                Ok(amount) => {
-                    &&& caller == beneficiary
-                    &&& amount as int
-                        == (*final(claimed) as int) - (*old(claimed) as int)
-                    &&& *final(claimed) as int
-                        == state_after_claim::<AccountId>(
-                                CoreState {
-                                    beneficiary,
-                                    params:      *params,
-                                    claimed:     *old(claimed),
-                                },
-                                now_ms,
-                           ).claimed as int
-                }
-                Err(_) => true,
-            },
-    {
-        if !(caller == beneficiary) {
-            return Err(ClaimError::Unauthorized);
-        }
-        let amount = match compute_claim(params, now_ms, *claimed) {
-            Ok(a)  => a,
-            Err(_) => return Err(ClaimError::ArithOverflow),
-        };
-        proof {
-            lemma_vested_bounded(*params, now_ms);
-        }
-        if amount > 0 {
-            *claimed = *claimed + amount;
-        }
-        Ok(amount)
-    }
-}
+pub use verified_helpers::{verified_claim_step, ClaimError};
 
 // =====================================================================
 // ink! contract (Layer 3)

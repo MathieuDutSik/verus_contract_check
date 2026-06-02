@@ -5,36 +5,34 @@
 // a `static mut` between calls. The vesting state is one grant per
 // program — no map needed.
 //
-// Layout:
-//   - `pub mod core;`         — chain-agnostic State<A>, schedule,
-//                               and monotonicity lemmas (identical to
-//                               the other chains).
-//   - `pub mod gear_axioms;`  — Gear-specific axioms: ActorId external
-//                               type, `source()` and `now_ms()` runtime
-//                               wrappers + their ghost projections.
-//   - this file               — the contract: `Vesting` struct,
-//                               verified `apply_claim` and
-//                               `verified_claim` helpers, `init` and
-//                               `handle` extern "C" entry points.
+// Layout (mirrors `linera_alternate` fungible):
+//   - `pub mod core;`              — chain-agnostic verified core.
+//   - `pub mod gear_axioms;`       — Gear runtime axioms (ActorId,
+//                                    `source()` / `now_ms()` + ghosts).
+//   - `pub mod verified_helpers;`  — `apply_claim` (test-injectable)
+//                                    and `verified_claim` (production
+//                                    runtime-facing kernel).
+//   - this file                    — `Vesting` struct + scale codec
+//                                    message types + `extern "C"`
+//                                    entry points + tests.
 //
 // `apply_claim` is a unit-testable kernel that takes the sender/time
 // as explicit parameters (so unit tests can inject them). The
 // runtime-facing `verified_claim` is a thin forwarder that reads
 // sender + time via `source()` / `now_ms()` and calls `apply_claim`.
-// Same shape as the fungible Gear contract's `apply_transfer` /
-// `verified_transfer` pair.
 
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
 pub mod core;
 pub mod gear_axioms;
+pub mod verified_helpers;
 
 use gstd::{msg, prelude::*, ActorId};
 use parity_scale_codec::{Decode, Encode};
 use scale_info::TypeInfo;
 
-use crate::gear_axioms::{now_ms, source};
+use crate::verified_helpers::{apply_claim, verified_claim, ClaimError};
 use verus_vesting_core::{compute_claim, compute_vested, Params};
 
 #[derive(Encode, Decode, TypeInfo)]
@@ -114,123 +112,6 @@ impl Vesting {
         let beneficiary = self.beneficiary.expect("not initialised");
         let p = self.params();
         apply_claim(sender, now, beneficiary, &p, &mut self.claimed)
-    }
-}
-
-// =====================================================================
-// Verified helpers (inside `verus!{}`)
-// =====================================================================
-
-vstd::prelude::verus! {
-    #[cfg(verus_only)]
-    use vstd::prelude::*;
-    #[cfg(verus_only)]
-    use crate::core::{
-        State as CoreState, claimable_at, lemma_vested_bounded, state_after_claim,
-    };
-    #[cfg(verus_only)]
-    use crate::gear_axioms::{the_sender, the_now_ms};
-
-    /// Errors the verified helpers raise.
-    #[derive(PartialEq, Eq, Debug)]
-    pub enum ClaimError {
-        Unauthorized,
-        ArithOverflow,
-    }
-
-    /// Verified claim kernel: the substantive logic, taking `sender`
-    /// and `now` as explicit parameters so it's shared between the
-    /// production path (which reads them from `msg::source()` /
-    /// `exec::block_timestamp()`) and the unit-test path.
-    ///
-    /// `ensures` (success path):
-    ///
-    ///   - authorisation: `sender == beneficiary`.
-    ///   - state-level connection: `*final(claimed) == state_after_claim(
-    ///     CoreState { beneficiary, params: *params, claimed: *old(claimed) },
-    ///     now ).claimed`.
-    ///   - monotonicity: `*final(claimed) >= *old(claimed)`.
-    ///   - the returned amount equals the delta in `claimed`.
-    pub fn apply_claim(
-        sender:      ActorId,
-        now:         u64,
-        beneficiary: ActorId,
-        params:      &Params,
-        claimed:     &mut u128,
-    ) -> (r: Result<u128, ClaimError>)
-        requires
-            params.well_formed(),
-            (*old(claimed) as nat) <= (params.total as nat),
-        ensures
-            *final(claimed) >= *old(claimed),
-            match r {
-                Ok(amount) => {
-                    &&& sender == beneficiary
-                    &&& amount as int
-                        == (*final(claimed) as int) - (*old(claimed) as int)
-                    &&& *final(claimed) as int
-                        == state_after_claim::<ActorId>(
-                                CoreState {
-                                    beneficiary,
-                                    params:      *params,
-                                    claimed:     *old(claimed),
-                                },
-                                now,
-                           ).claimed as int
-                }
-                Err(_) => true,
-            },
-    {
-        if !(sender == beneficiary) {
-            return Err(ClaimError::Unauthorized);
-        }
-        let amount = match compute_claim(params, now, *claimed) {
-            Ok(a)  => a,
-            Err(_) => return Err(ClaimError::ArithOverflow),
-        };
-        proof {
-            lemma_vested_bounded(*params, now);
-        }
-        if amount > 0 {
-            *claimed = *claimed + amount;
-        }
-        Ok(amount)
-    }
-
-    /// Verified claim entry point. Reads the sender via the axiomatised
-    /// `source()` and the time via `now_ms()`, then delegates to
-    /// `apply_claim`. This is what production `handle()` calls.
-    pub fn verified_claim(
-        beneficiary: ActorId,
-        params:      &Params,
-        claimed:     &mut u128,
-    ) -> (r: Result<u128, ClaimError>)
-        requires
-            params.well_formed(),
-            (*old(claimed) as nat) <= (params.total as nat),
-        ensures
-            *final(claimed) >= *old(claimed),
-            match r {
-                Ok(amount) => {
-                    &&& the_sender() == beneficiary
-                    &&& amount as int
-                        == (*final(claimed) as int) - (*old(claimed) as int)
-                    &&& *final(claimed) as int
-                        == state_after_claim::<ActorId>(
-                                CoreState {
-                                    beneficiary,
-                                    params:      *params,
-                                    claimed:     *old(claimed),
-                                },
-                                the_now_ms(),
-                           ).claimed as int
-                }
-                Err(_) => true,
-            },
-    {
-        let sender = source();
-        let now    = now_ms();
-        apply_claim(sender, now, beneficiary, params, claimed)
     }
 }
 

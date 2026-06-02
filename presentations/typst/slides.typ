@@ -58,12 +58,6 @@
 #v(0.2em)
 
 #small[
-Source: #link("https://github.com/MathieuDutSik/verus_contract_check")[`github.com/MathieuDutSik/verus_contract_check`]
-]
-
-#v(0.2em)
-
-#small[
 *Scope:* implement and verify the ERC-20 surface — `balance_of`, `transfer`, and the `approve` / `allowance` / `transfer_from` allowance machinery — across each chain.
 ]
 
@@ -91,6 +85,12 @@ Source: #link("https://github.com/MathieuDutSik/verus_contract_check")[`github.c
 
 - *Decompose the hard parts into lemmas.*\
   #small[Conservation, refinement from `nat` to `u128`, state-level invariants — each proved once as a reusable lemma, then applied at every call site.]
+
+#v(0.6em)
+
+#small[
+Source: #link("https://github.com/MathieuDutSik/verus_contract_check")[`github.com/MathieuDutSik/verus_contract_check`]
+]
 
 #pagebreak()
 
@@ -361,11 +361,15 @@ IC, Linera have verified kernels but no `nat_balances`-bridged conservation theo
 
 #v(0.6em)
 
-*3. The Solana framing layer.*\
+*3. Per-chain structural challenge.*\
 #small[
-Write A doesn't change Account B's view, but our pure-function ghost model doesn't say that. Needs explicit `tracked` ghost state.
+Each platform has one feature that resists a uniform verification story:
+- *CosmWasm* — `SubMsg` / reply dispatch.
+- *NEAR* — SDK encapsulation (sealed traits) and the `Promise` async model.
+- *Internet Computer* — inter-canister calls and orthogonal persistence.
+- *Gear* — actor-style message passing over `static mut` global state.
+- *ink!* — opaque `Mapping` storage, hard to axiomatize cleanly.
+- *MultiversX* — managed-type trait machinery (`BigUint`, `ManagedTypeApi`).
+- *Solana* — account-data model: many mutable account views, no native map.
+- *Linera* — the *microchain* architecture and cross-microchain messaging.
 ]
-
-#v(0.6em)
-
-*4. MultiversX `SingleValueMapper`* and *Linera `verified_approve`*: pieces left when `OwnerSpender::new` panics on `owner == spender`.
