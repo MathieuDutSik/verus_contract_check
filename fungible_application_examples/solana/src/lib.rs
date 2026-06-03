@@ -1,5 +1,5 @@
-// Solana fungible-token program with Verus-verified arithmetic + allowance
-// logic.
+// Solana fungible-token program with Verus-verified arithmetic +
+// allowance logic.
 //
 // Solana's data model: state lives in account data buffers, not in
 // per-instance struct state. Each instruction takes a `&[AccountInfo]`
@@ -7,22 +7,30 @@
 // via Borsh. Authorization is via `signer.is_signer` flags on the
 // `AccountInfo`s.
 //
-// We factor the work into:
-//   - Layer 1 (`core.rs`): chain-agnostic State<A> + conservation lemmas.
-//   - Layer 2 (`apply_*` functions in this file, inside `verus!{}`):
-//     pure-data updates on `Mint` / `TokenAccount` with `ensures`
-//     proving the safety properties (balance conservation, signer/owner
-//     check, allowance decrement).
-//   - Layer 3 (entry-point `process_instruction`): unverified glue —
-//     deserialises account data, calls the verified apply_*, reserialises.
-//
-// We extend the existing `TokenAccount` with cw20/SPL-Token style
-// allowance fields (`delegate`, `delegated_amount`) so we can verify
-// approve / transfer_from / revoke.
+// Layout (mirrors `linera_alternate` fungible):
+//   - `pub mod core;`              — chain-agnostic State<A> +
+//                                    conservation lemmas.
+//   - `pub mod solana_axioms;`     — Solana runtime axioms: Pubkey /
+//                                    AccountInfo external types,
+//                                    `read_*` / `write_*` accessor
+//                                    wrappers, `TokenError` enum and
+//                                    `Mint` / `TokenAccount` data
+//                                    structs (which appear in axiom
+//                                    signatures).
+//   - `pub mod verified_helpers;`  — pure-data `apply_*` updates plus
+//                                    `verified_transfer_instruction`
+//                                    end-to-end dispatcher.
+//   - this file                    — `Instruction` enum + entrypoint
+//                                    + `process_instruction` glue +
+//                                    per-instruction wrappers + tests.
 
 pub mod core;
+pub mod solana_axioms;
+pub mod verified_helpers;
 
+#[cfg(not(verus_only))]
 use borsh::{BorshDeserialize, BorshSerialize};
+#[cfg(not(verus_only))]
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint,
@@ -30,6 +38,12 @@ use solana_program::{
     msg,
     program_error::ProgramError,
     pubkey::Pubkey,
+};
+
+pub use solana_axioms::{Mint, TokenAccount, TokenError};
+pub use verified_helpers::{
+    apply_approve, apply_burn, apply_init_mint, apply_mint, apply_revoke,
+    apply_transfer, apply_transfer_from, verified_transfer_instruction,
 };
 
 // Struct definitions inside verus!{} so Verus sees them natively. Borsh

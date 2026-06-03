@@ -1,64 +1,26 @@
+// MultiversX fungible-token contract with Verus-verified BigUint
+// transfer arithmetic.
+//
+// Layout (mirrors `linera_alternate` fungible):
+//   - `pub mod fungible_core;`     — chain-agnostic verified core.
+//                                    (Renamed from `core` because the
+//                                    `#[multiversx_sc::contract]` macro
+//                                    expansion references `::core::mem`.)
+//   - `pub mod mvx_axioms;`        — BigUint, ManagedAddress, and the
+//                                    ManagedTypeApi trait hierarchy.
+//   - `pub mod verified_helpers;`  — `verified_transfer_big` kernel.
+//   - this file                    — `#[multiversx_sc::contract]` trait
+//                                    `Fungible` + storage mappers +
+//                                    tests.
+
 #![cfg_attr(not(test), no_std)]
 
-// Chain-agnostic verified core (Layer 1): arithmetic + State<A> + conservation
-// lemmas. Lives outside the `#[multiversx_sc::contract]` macro module so
-// Verus can parse it.
 #[path = "core.rs"]
 pub mod fungible_core;
-
-// MultiversX-specific axiomatization of BigUint, ManagedAddress, and the
-// ManagedTypeApi trait hierarchy.
 pub mod mvx_axioms;
+pub mod verified_helpers;
 
-// Verified BigUint transfer kernel. Operates on the abstract `nat` view of
-// BigUint values; conservation is proven at that level. Sits outside the
-// macro module so Verus can parse it; the contract endpoint calls into it.
-use mvx_axioms::{biguint_ge, biguint_sub, biguint_add_assign};
-use multiversx_sc::api::ManagedTypeApi;
-use multiversx_sc::types::BigUint;
-
-vstd::prelude::verus! {
-    #[cfg(verus_only)]
-    use vstd::prelude::*;
-    #[cfg(verus_only)]
-    use mvx_axioms::biguint_val;
-
-    /// Verified BigUint transfer: returns the new (from, to) balance pair
-    /// such that `from_next + to_next == from_balance + to_balance` and
-    /// each side moves by exactly `amount`. Fails with `Err(())` on
-    /// underflow.
-    ///
-    /// No overflow precondition — BigUint is unbounded by construction, so
-    /// addition is unconditional. The `u128` version in `fungible_core`
-    /// must check `to_balance + amount <= u128::MAX`; the BigUint version
-    /// does not.
-    pub fn verified_transfer_big<M: ManagedTypeApi>(
-        from_balance: BigUint<M>,
-        to_balance:   BigUint<M>,
-        amount:       &BigUint<M>,
-    ) -> (r: Result<(BigUint<M>, BigUint<M>), ()>)
-        ensures
-            match r {
-                Ok((from_next, to_next)) =>
-                    biguint_val(&from_next) + biguint_val(&to_next)
-                        == biguint_val(&from_balance) + biguint_val(&to_balance)
-                    && biguint_val(&from_next)
-                        == (biguint_val(&from_balance) - biguint_val(amount)) as nat
-                    && biguint_val(&to_next)
-                        == biguint_val(&to_balance) + biguint_val(amount),
-                Err(()) =>
-                    biguint_val(&from_balance) < biguint_val(amount),
-            },
-    {
-        if !biguint_ge(&from_balance, amount) {
-            return Err(());
-        }
-        let from_next = biguint_sub(from_balance, amount);
-        let mut to_next = to_balance;
-        biguint_add_assign(&mut to_next, amount);
-        Ok((from_next, to_next))
-    }
-}
+pub use verified_helpers::verified_transfer_big;
 
 multiversx_sc::imports!();
 

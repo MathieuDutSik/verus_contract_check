@@ -69,7 +69,7 @@
 #v(0.4em)
 
 - *Verification code lives next to the Rust it verifies.*\
-  #small[`requires` / `ensures` / `proof` blocks sit in the same crate as the code that compiles to wasm. No separate spec artifact to drift.]
+  #small[`requires` / `ensures` / `proof` blocks sit in the same crate as the code that compiles to Wasm/eBPF. No separate spec artifact to drift.]
 
 #v(0.4em)
 
@@ -164,10 +164,10 @@ We want this to be a *theorem*:
 // ===================================================================
 // Slide 4 — Verus in one slide
 // ===================================================================
-= Verus and rust code alongside.
+= Verus as it looks like
 
 #small[
-*Refinement-typed Rust*. You annotate the same Rust that compiles to wasm; the verifier checks the annotations match the body. No separate spec language.
+*Refinement-typed Rust*. You annotate the same Rust that compiles to Wasm/eBPF; the verifier checks the annotations match the body. No separate spec language.
 ]
 
 #v(0.3em)
@@ -324,13 +324,13 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg)
   [Certora],      [Solidity / Yul],        [CVL spec language, SMT],
   [Slither / Mythril], [Solidity],         [static analysis, bug-finding],
   [Halmos / Foundry-invariant], [Solidity], [bounded symbolic / property testing],
-  [*Verus (this work)*], [*Rust → wasm*], [*refinement on production code*],
+  [*Verus (this work)*], [*Rust → Wasm/eBPF*], [*refinement on production code*],
 )
 
 #v(0.6em)
 
 #small[
-*The differentiator*: Verus annotations live on the same Rust code that compiles to the deployed wasm. No separate spec artifact to drift. Any chain whose contract language is Rust (or compiles via Rust) is in scope — including most non-EVM chains.
+*The differentiator*: Verus annotations live on the same Rust code that compiles to the deployed Wasm/eBPF. No separate spec artifact to drift. Any chain whose contract language is Rust (or compiles via Rust) is in scope — including most non-EVM chains.
 ]
 
 #v(0.6em)
