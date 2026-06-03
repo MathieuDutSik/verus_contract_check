@@ -1,11 +1,28 @@
+// Gear fungible-token program with Verus-verified core arithmetic.
+//
+// Layout (mirrors `linera_alternate` fungible):
+//   - `pub mod core;`              — chain-agnostic verified core.
+//   - `pub mod gear_axioms;`       — ActorId external type +
+//                                    `msg::source()` wrapper + ghost.
+//   - `pub mod verified_helpers;`  — `AxHashMap<K, V>` wrapper +
+//                                    `view_map` ghost + `read_balance` /
+//                                    `save_balance` axioms +
+//                                    `apply_transfer` /
+//                                    `verified_transfer` kernels.
+//   - this file                    — `Fungible` struct + scale codec
+//                                    message types + `extern "C"`
+//                                    `init`/`handle` entry points +
+//                                    tests.
+
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
 pub mod core;
 pub mod gear_axioms;
+pub mod verified_helpers;
 
+use crate::verified_helpers::{apply_transfer, save_balance, verified_transfer, AxHashMap};
 use gstd::{msg, prelude::*, ActorId};
-use hashbrown::HashMap;
 use parity_scale_codec::{Decode, Encode};
 use scale_info::TypeInfo;
 

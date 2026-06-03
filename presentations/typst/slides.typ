@@ -101,24 +101,21 @@ Source: #link("https://github.com/MathieuDutSik/verus_contract_check")[`github.c
 
 A fungible-token contract holds a balance map and a `total_supply` field.
 
-#v(0.5em)
+#v(0.3em)
 
 The invariant every honest implementation should satisfy:
 
 #align(center)[
-  #box(stroke: 1pt + rgb("#444"), inset: 0.7em, radius: 4pt)[
+  #box(stroke: 1pt + rgb("#444"), inset: 0.5em, radius: 4pt)[
     $sum_(a in "accounts") "balance"(a) = "total_supply"$
   ]
 ]
 
-#v(0.5em)
+#v(0.3em)
 
 The bug class:
 - *Compound* (Sep 2021): MASTER inflation, \$80M.
 - *USDC* (theoretical via faulty `_mint`): unbounded creation.
-- *TheDAO* (Jun 2016): not conservation per se, but a different invariant violated.
-
-#v(0.5em)
 
 #small[A single overflow on `to_balance + amount` and the sum no longer matches the supply. Tests with concrete inputs cannot prove the invariant holds for *all* inputs.]
 
@@ -129,9 +126,11 @@ The bug class:
 // ===================================================================
 = Tests check examples. Proofs check classes.
 
+#set text(size: 20pt)
+
 #grid(
   columns: (1fr, 1fr),
-  gutter: 1em,
+  gutter: 0.8em,
   [
     *Testing*
     - Pick inputs `(from, to, amount)`.
@@ -148,13 +147,13 @@ The bug class:
   ],
 )
 
-#v(1em)
+#v(0.3em)
 
 We want this to be a *theorem*:
 
 #align(center)[
-  #box(stroke: 1pt + rgb("#444"), inset: 0.7em, radius: 4pt)[
-    #set text(size: 20pt)
+  #box(stroke: 1pt + rgb("#444"), inset: 0.4em, radius: 4pt)[
+    #set text(size: 17pt)
     For any pre-state $s$, any `(from, to, amount)`, if `transfer` returns Ok\
     then $"sum"("balances")$ in the post-state equals $"sum"("balances")$ in $s$.
   ]
@@ -165,7 +164,7 @@ We want this to be a *theorem*:
 // ===================================================================
 // Slide 4 — Verus in one slide
 // ===================================================================
-= Verus in one slide
+= Verus and rust code alongside.
 
 #small[
 *Refinement-typed Rust*. You annotate the same Rust that compiles to wasm; the verifier checks the annotations match the body. No separate spec language.
