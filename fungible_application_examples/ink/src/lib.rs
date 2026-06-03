@@ -16,6 +16,16 @@ pub mod verified_helpers;
 pub use verified_helpers::{verified_burn_step, verified_mint_step};
 pub use verus_fungible_core::TransferError;
 
+// The `#[ink::contract]` macro expands to wasm dispatch + ABI code that
+// depends on `Error: scale::Encode` / `scale::Decode`. Cfg-gating
+// either the macro module or the derives alone breaks compilation in
+// the other branch (the macro needs the impls; Verus warns on the
+// derives). The fix: gate the *whole module* behind `not(verus_only)`,
+// so Verus never sees the macro expansion (and therefore never sees
+// the derives that it can't handle). The verified helpers
+// (`verified_mint_step` / `verified_burn_step`) live outside this
+// module in `verified_helpers.rs`, so verification is unaffected.
+#[cfg(not(verus_only))]
 #[ink::contract]
 mod fungible {
     use crate::core as fcore;

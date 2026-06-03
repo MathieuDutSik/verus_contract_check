@@ -25,22 +25,28 @@ use crate::verified_helpers::{
     apply_transfer, read_balance, save_balance, verified_transfer, AxHashMap,
 };
 use gstd::{msg, prelude::*, ActorId};
+// The scale codec derives below are cfg-gated behind `not(verus_only)`
+// because their expansions confuse Verus's automatically-derived-item
+// handling. The imports stay unconditional (zero runtime cost; Verus
+// silently accepts an unused trait import).
+#[cfg_attr(verus_only, allow(unused_imports))]
 use parity_scale_codec::{Decode, Encode};
+#[cfg_attr(verus_only, allow(unused_imports))]
 use scale_info::TypeInfo;
 
-#[derive(Encode, Decode, TypeInfo)]
+#[cfg_attr(not(verus_only), derive(Encode, Decode, TypeInfo))]
 pub struct InitConfig {
     pub owner: ActorId,
     pub total_supply: u128,
 }
 
-#[derive(Encode, Decode, TypeInfo)]
+#[cfg_attr(not(verus_only), derive(Encode, Decode, TypeInfo))]
 pub enum Action {
     Transfer { to: ActorId, amount: u128 },
     BalanceOf { account: ActorId },
 }
 
-#[derive(Encode, Decode, TypeInfo)]
+#[cfg_attr(not(verus_only), derive(Encode, Decode, TypeInfo))]
 pub enum Event {
     Transferred { from: ActorId, to: ActorId, amount: u128 },
     Balance { account: ActorId, amount: u128 },
@@ -85,20 +91,30 @@ impl Fungible {
 
 pub use verus_fungible_core::TransferError;
 
+// The gear runtime entry points are unverified glue. Gate them behind
+// `not(verus_only)` so `cargo verus verify` never sees the
+// `msg::load::<InitConfig>()` / `msg::reply(Event::...)` call sites —
+// those require `InitConfig: Decode` / `Event: Encode` impls that come
+// from the (now also `not(verus_only)`-gated) scale derives. The
+// runtime build (which IS what gets deployed) sees them unchanged.
 
+#[cfg(not(verus_only))]
 static mut STATE: Option<Fungible> = None;
 
+#[cfg(not(verus_only))]
 fn state() -> &'static mut Fungible {
     #[allow(static_mut_refs)]
     unsafe { STATE.as_mut().expect("uninitialized") }
 }
 
+#[cfg(not(verus_only))]
 #[no_mangle]
 extern "C" fn init() {
     let cfg: InitConfig = msg::load().expect("init payload");
     unsafe { STATE = Some(Fungible::init(cfg.owner, cfg.total_supply)); }
 }
 
+#[cfg(not(verus_only))]
 #[no_mangle]
 extern "C" fn handle() {
     let action: Action = msg::load().expect("handle payload");
