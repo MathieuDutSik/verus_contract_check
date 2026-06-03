@@ -12,7 +12,7 @@ for dir in "$SCRIPT_DIR"/*/; do
     name="$(basename "$dir")"
     echo
     echo "=== $name ==="
-    if ( cd "$dir" && cargo build "$@" ); then
+    if ( cd "$dir" && cargo verus build "$@" ); then
         pass=$((pass+1))
     else
         fail=$((fail+1))

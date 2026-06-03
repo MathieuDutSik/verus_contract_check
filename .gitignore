@@ -4,3 +4,6 @@ target/
 
 # macOS
 .DS_Store
+
+# Built typst presentation
+presentations/typst/slides.pdf
